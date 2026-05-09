@@ -75,6 +75,7 @@ async def github_webhook(payload: WebhookPayload, background_tasks: BackgroundTa
 @app.post("/webhook/manual")
 async def manual_trigger(
     background_tasks: BackgroundTasks,
+    scenario: str = "flow1",
     changed_files: list[str] | None = None,
     commit_sha: str = "manual",
     branch: str = "main",
@@ -84,8 +85,8 @@ async def manual_trigger(
                 trigger_commit=commit_sha, trigger_branch=branch)
     await db.create_run(run)
     background_tasks.add_task(_run_pipeline, run_id, commit_sha, branch,
-                              changed_files or ["checkout.html"])
-    return {"run_id": run_id, "status": "started"}
+                              changed_files or ["checkout.html"], scenario)
+    return {"run_id": run_id, "status": "started", "scenario": scenario}
 
 
 async def _run_pipeline(
@@ -93,6 +94,7 @@ async def _run_pipeline(
     commit_sha: str,
     branch: str,
     changed_files: list[str],
+    scenario: str = "flow1",
 ) -> None:
     run = await db.get_run(run_id)
     if run:
@@ -104,6 +106,7 @@ async def _run_pipeline(
         "trigger_commit": commit_sha,
         "trigger_branch": branch,
         "changed_files": changed_files,
+        "scenario": scenario,
         "suites_to_run": [],
         "junit_xml": "",
         "failures": [],

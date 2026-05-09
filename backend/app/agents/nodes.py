@@ -3,7 +3,6 @@ LangGraph node functions for the QA pipeline.
 Each node updates QAState and emits a node status update to the DB.
 """
 import json
-import subprocess
 import structlog
 from pathlib import Path
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -74,44 +73,92 @@ async def change_analyzer_node(state: QAState) -> QAState:
     return {**state, "suites_to_run": suites}
 
 
+# Mock failure sets keyed by demo scenario.
+# Phase 2 will replace this with real subprocess pytest execution.
+_MOCK_FAILURES: dict[str, list[dict]] = {
+    "flow1": [
+        {
+            "test": "tests/test_checkout.py::test_checkout_submit_button_exists",
+            "raw": "FAILED tests/test_checkout.py::test_checkout_submit_button_exists - "
+                   "playwright._impl._errors.Error: Locator.wait_for: Timeout 5000ms exceeded. "
+                   "selector '.btn-checkout' resolved to 0 elements.",
+            "selector": ".btn-checkout",
+            "expected": "visible",
+            "actual": "element not found",
+        }
+    ],
+    "flow2": [
+        {
+            "test": "tests/test_checkout.py::test_checkout_submit_button_text",
+            "raw": "FAILED tests/test_checkout.py::test_checkout_submit_button_text - "
+                   "AssertionError: Expected button text 'Submit Order' but got 'Place Order'.",
+            "selector": "button:has-text('Submit Order')",
+            "expected": "Submit Order",
+            "actual": "Place Order",
+        }
+    ],
+    "flow3": [
+        {
+            "test": "tests/test_login.py::test_login_with_valid_credentials",
+            "raw": "FAILED tests/test_login.py::test_login_with_valid_credentials - "
+                   "playwright._impl._errors.Error: page.wait_for_url: Timeout 5000ms exceeded. "
+                   "Expected URL pattern '**/dashboard.html' but ended up at '.../products.html'.",
+            "selector": "page.url",
+            "expected": "**/dashboard.html",
+            "actual": "**/products.html",
+        }
+    ],
+}
+
+_MOCK_DOM_REPORTS: dict[str, dict] = {
+    "flow1": {
+        "inspected": True,
+        "url": "https://lamaqrait.github.io/rait-qa-demo/checkout.html",
+        "changed_selectors": [
+            {"old": ".btn-checkout", "found": ".btn-place-order",
+             "element_text": "Place Order", "confidence": 0.94}
+        ],
+        "notes": "Button element located by text — class renamed from btn-checkout to btn-place-order",
+    },
+    "flow2": {
+        "inspected": True,
+        "url": "https://lamaqrait.github.io/rait-qa-demo/checkout.html",
+        "changed_selectors": [
+            {"old": "button:has-text('Submit Order')", "found": "button:has-text('Place Order')",
+             "element_text": "Place Order", "confidence": 0.61}
+        ],
+        "notes": "Button copy changed — semantically equivalent but intent unclear without context",
+    },
+    "flow3": {
+        "inspected": True,
+        "url": "https://lamaqrait.github.io/rait-qa-demo/login.html",
+        "changed_selectors": [],
+        "notes": "Login form selectors intact — redirect target changed from /dashboard to /products",
+    },
+}
+
+
 # ── Node 2: Test Runner ───────────────────────────────────────────────────────
 
 async def test_runner_node(state: QAState) -> QAState:
     run_id = state["run_id"]
+    scenario = state.get("scenario", "flow1")
     suites = state.get("suites_to_run", [])
     await _update_node(run_id, "test_runner", "running",
                        f"Running {len(suites)} suite(s)…")
-    log.info("test_runner.start", run_id=run_id, suites=suites)
+    log.info("test_runner.start", run_id=run_id, scenario=scenario, suites=suites)
 
-    junit_path = ARTIFACTS_DIR / f"{run_id}.xml"
-    cmd = [
-        "python", "-m", "pytest",
-        *[str(TESTS_DIR / s) for s in suites],
-        "--tb=short",
-        f"--junit-xml={junit_path}",
-        "-q",
-    ]
+    # Simulate test execution delay
+    import asyncio as _asyncio
+    await _asyncio.sleep(2)
 
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        junit_xml = junit_path.read_text() if junit_path.exists() else ""
-        passed = result.returncode == 0
-        annotation = "All tests passed" if passed else f"Failures detected — exit {result.returncode}"
-        node_state = "success" if passed else "failed"
-        await _update_node(run_id, "test_runner", node_state, annotation)
-        log.info("test_runner.done", run_id=run_id, passed=passed)
-        return {**state, "junit_xml": junit_xml, "failures": _parse_failures(result.stdout)}
-    except subprocess.TimeoutExpired:
-        await _update_node(run_id, "test_runner", "failed", "Timeout after 120s")
-        return {**state, "junit_xml": "", "failures": [], "error": "playwright_timeout"}
-
-
-def _parse_failures(stdout: str) -> list[dict]:
-    failures = []
-    for line in stdout.splitlines():
-        if "FAILED" in line:
-            failures.append({"test": line.strip(), "raw": line})
-    return failures
+    failures = _MOCK_FAILURES.get(scenario, [])
+    passed = len(failures) == 0
+    annotation = "All tests passed" if passed else f"{len(failures)} failure(s) detected"
+    node_state = "success" if passed else "failed"
+    await _update_node(run_id, "test_runner", node_state, annotation)
+    log.info("test_runner.done", run_id=run_id, passed=passed, failures=len(failures))
+    return {**state, "junit_xml": "", "failures": failures}
 
 
 # ── Node 3: Browser Inspector ─────────────────────────────────────────────────
@@ -119,6 +166,7 @@ def _parse_failures(stdout: str) -> list[dict]:
 async def browser_inspector_node(state: QAState) -> QAState:
     run_id = state["run_id"]
     failures = state.get("failures", [])
+    scenario = state.get("scenario", "flow1")
 
     if not failures:
         await _update_node(run_id, "browser_inspector", "skipped", "No failures to inspect")
@@ -127,15 +175,18 @@ async def browser_inspector_node(state: QAState) -> QAState:
     await _update_node(run_id, "browser_inspector", "running",
                        "Inspecting live DOM for selector changes…")
 
-    # Phase 2 will invoke browser-use agent here.
-    # For Phase 1, return a stub DOM report so the pipeline continues.
-    dom_report: dict = {
-        "inspected": True,
-        "changed_selectors": [],
-        "notes": "Phase 1 stub — browser-use agent wired in Phase 2",
-    }
-    await _update_node(run_id, "browser_inspector", "success",
-                       "DOM inspection complete")
+    import asyncio as _asyncio
+    await _asyncio.sleep(2)
+
+    # Phase 2: swap this with a real browser-use agent call.
+    dom_report = _MOCK_DOM_REPORTS.get(scenario, {
+        "inspected": True, "changed_selectors": [], "notes": "No DOM changes detected",
+    })
+    changed = len(dom_report.get("changed_selectors", []))
+    annotation = (f"Found {changed} changed selector(s)" if changed
+                  else "No selector changes found")
+    await _update_node(run_id, "browser_inspector", "success", annotation)
+    log.info("browser_inspector.done", run_id=run_id, scenario=scenario, changed=changed)
     return {**state, "dom_report": dom_report}
 
 

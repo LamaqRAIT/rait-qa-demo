@@ -6,6 +6,8 @@ class QAState(TypedDict):
     trigger_commit: str
     trigger_branch: str
     changed_files: list[str]
+    # "flow1" | "flow2" | "flow3" — controls mock test results for demo
+    scenario: str
     suites_to_run: list[str]
     junit_xml: str
     failures: list[dict[str, Any]]

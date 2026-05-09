@@ -1,9 +1,12 @@
-FROM mcr.microsoft.com/playwright/python:v1.49.0-jammy
+FROM python:3.12-slim
 
 WORKDIR /app
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Install Chromium + all system deps (apt-get based, works on slim)
+RUN playwright install chromium --with-deps
 
 COPY . .
 

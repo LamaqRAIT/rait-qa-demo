@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# DB
+backend/demo.db
+backend/artifacts/
+
+# Node
+agent-ui/node_modules/
+agent-ui/.next/
+agent-ui/.env.local
+
+# Env
+.env
+backend/.env
+
+# IDE
+.DS_Store
+.vscode/
+*.iml

@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <!-- DRIFT VARIANT: FLOW 2 — Button text: "Submit Order" → "Place Order" -->
+  <title>Checkout — ShopRAIT</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <nav>
+    <a href="products.html" class="nav-brand"><span></span>ShopRAIT</a>
+    <a href="products.html">Products</a>
+    <a href="checkout.html">Checkout</a>
+    <a href="login.html" style="margin-left:auto; color: var(--text-muted);">Sign out</a>
+  </nav>
+
+  <div class="container">
+    <div class="page-header">
+      <h1>Checkout</h1>
+      <p>Review your order and complete your purchase.</p>
+    </div>
+
+    <div style="display:grid; grid-template-columns:1fr 380px; gap:32px; align-items:start;">
+      <!-- Left: Shipping form -->
+      <div>
+        <h2 style="font-size:16px; font-weight:600; margin-bottom:16px;">Shipping Information</h2>
+        <div class="card" style="margin-bottom:24px;">
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px;">
+            <div class="form-group">
+              <label for="first-name">First name</label>
+              <input type="text" id="first-name" placeholder="Demo">
+            </div>
+            <div class="form-group">
+              <label for="last-name">Last name</label>
+              <input type="text" id="last-name" placeholder="User">
+            </div>
+          </div>
+          <div class="form-group">
+            <label for="address">Street address</label>
+            <input type="text" id="address" placeholder="123 Main St">
+          </div>
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px;">
+            <div class="form-group">
+              <label for="city">City</label>
+              <input type="text" id="city" placeholder="Mumbai">
+            </div>
+            <div class="form-group">
+              <label for="zip">ZIP code</label>
+              <input type="text" id="zip" placeholder="400001">
+            </div>
+          </div>
+        </div>
+
+        <h2 style="font-size:16px; font-weight:600; margin-bottom:16px;">Payment</h2>
+        <div class="card">
+          <div class="form-group">
+            <label for="card-number">Card number</label>
+            <input type="text" id="card-number" placeholder="4242 4242 4242 4242">
+          </div>
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px;">
+            <div class="form-group">
+              <label for="expiry">Expiry</label>
+              <input type="text" id="expiry" placeholder="MM / YY">
+            </div>
+            <div class="form-group">
+              <label for="cvc">CVC</label>
+              <input type="text" id="cvc" placeholder="123">
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right: Order summary + submit button -->
+      <div>
+        <h2 style="font-size:16px; font-weight:600; margin-bottom:16px;">Order Summary</h2>
+        <div class="order-summary">
+          <div class="order-row">
+            <span>Wireless Headphones × 1</span>
+            <span>$89.00</span>
+          </div>
+          <div class="order-row">
+            <span>Shipping</span>
+            <span style="color:var(--text-muted);">Free</span>
+          </div>
+          <div class="order-row">
+            <span>Tax (18%)</span>
+            <span>$16.02</span>
+          </div>
+          <div class="order-row">
+            <span>Total</span>
+            <span>$105.02</span>
+          </div>
+        </div>
+
+        <!--
+          ═══════════════════════════════════════════════════════════════
+          QA DRIFT CONTROL — CHECKOUT SUBMIT BUTTON
+          ═══════════════════════════════════════════════════════════════
+          FLOW 1 (Class Drift):
+            Normal:  class="btn-checkout"   ← test selector: .btn-checkout
+            Drifted: class="btn-place-order" ← selector breaks, test FAILS
+            → See checkout-drift-class.html for the drifted variant
+
+          FLOW 2 (Text Drift):
+            Normal:  inner text = "Submit Order"
+            Drifted: inner text = "Place Order"
+            → See checkout-drift-text.html for the drifted variant
+
+          These two toggles are INDEPENDENT and NEVER both active at once.
+          ═══════════════════════════════════════════════════════════════
+        -->
+        <button
+          class="btn btn-checkout"
+          id="submit-btn"
+          style="width:100%; height:48px; font-size:15px; font-weight:600;"
+          onclick="handleSubmit()"
+        >
+          Place Order
+        </button>
+
+        <p style="font-size:12px; color:var(--text-muted); text-align:center; margin-top:12px;">
+          🔒 Secured by ShopRAIT Payments
+        </p>
+
+        <div id="success-msg" style="
+          display:none; margin-top:16px;
+          padding:14px; border-radius:var(--radius-lg);
+          background:rgba(96,223,177,0.12);
+          border:1px solid rgba(96,223,177,0.30);
+          text-align:center; font-size:14px; font-weight:500;
+          color:#35b888;
+        ">
+          ✓ Order placed successfully!
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    <div class="container">ShopRAIT Demo · RAIT QA Agent Test Target</div>
+  </footer>
+
+  <script>
+    function handleSubmit() {
+      document.getElementById('success-msg').style.display = 'block';
+      document.getElementById('submit-btn').disabled = true;
+      document.getElementById('submit-btn').style.opacity = '0.5';
+    }
+  </script>
+</body>
+</html>

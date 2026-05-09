@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Products — ShopRAIT</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <nav>
+    <a href="products.html" class="nav-brand"><span></span>ShopRAIT</a>
+    <a href="products.html">Products</a>
+    <a href="checkout.html">Checkout</a>
+    <a href="login.html" style="margin-left:auto; color: var(--text-muted);">Sign out</a>
+  </nav>
+
+  <div class="container">
+    <div class="page-header">
+      <h1>Products</h1>
+      <p>Explore our collection of tech essentials.</p>
+    </div>
+
+    <div class="product-grid">
+      <!-- Product 1 -->
+      <div class="product-card">
+        <div class="product-image">🎧</div>
+        <div class="product-info">
+          <div class="product-name">Wireless Headphones</div>
+          <div class="product-price">$89.00 <span>Free shipping</span></div>
+          <button
+            class="btn btn-primary"
+            style="width:100%; justify-content:center;"
+            data-testid="add-to-cart"
+            data-product="wireless-headphones"
+            onclick="addToCart(this)"
+          >
+            Add to Cart
+          </button>
+        </div>
+      </div>
+
+      <!-- Product 2 -->
+      <div class="product-card">
+        <div class="product-image">⌨️</div>
+        <div class="product-info">
+          <div class="product-name">Mechanical Keyboard</div>
+          <div class="product-price">$120.00 <span>Free shipping</span></div>
+          <button
+            class="btn btn-primary"
+            style="width:100%; justify-content:center;"
+            data-testid="add-to-cart"
+            data-product="mechanical-keyboard"
+            onclick="addToCart(this)"
+          >
+            Add to Cart
+          </button>
+        </div>
+      </div>
+
+      <!-- Product 3 -->
+      <div class="product-card">
+        <div class="product-image">🔌</div>
+        <div class="product-info">
+          <div class="product-name">USB-C Hub</div>
+          <div class="product-price">$49.00 <span>Free shipping</span></div>
+          <button
+            class="btn btn-primary"
+            style="width:100%; justify-content:center;"
+            data-testid="add-to-cart"
+            data-product="usb-c-hub"
+            onclick="addToCart(this)"
+          >
+            Add to Cart
+          </button>
+        </div>
+      </div>
+
+      <!-- Product 4 -->
+      <div class="product-card">
+        <div class="product-image">🖱️</div>
+        <div class="product-info">
+          <div class="product-name">Ergonomic Mouse</div>
+          <div class="product-price">$65.00 <span>Free shipping</span></div>
+          <button
+            class="btn btn-primary"
+            style="width:100%; justify-content:center;"
+            data-testid="add-to-cart"
+            data-product="ergonomic-mouse"
+            onclick="addToCart(this)"
+          >
+            Add to Cart
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div id="cart-toast" style="
+      display:none; position:fixed; bottom:24px; right:24px;
+      background:var(--charcoal); color:var(--cream);
+      padding:12px 20px; border-radius:var(--radius-lg);
+      font-size:14px; font-weight:500; box-shadow:var(--shadow-md);
+      animation: fadeIn 0.2s ease;
+    ">
+      ✓ Added to cart
+    </div>
+  </div>
+
+  <footer>
+    <div class="container">ShopRAIT Demo · RAIT QA Agent Test Target</div>
+  </footer>
+
+  <style>
+    @keyframes fadeIn { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
+  </style>
+  <script>
+    function addToCart(btn) {
+      const toast = document.getElementById('cart-toast');
+      toast.textContent = `✓ ${btn.closest('.product-card').querySelector('.product-name').textContent} added`;
+      toast.style.display = 'block';
+      setTimeout(() => { toast.style.display = 'none'; }, 2000);
+    }
+  </script>
+</body>
+</html>

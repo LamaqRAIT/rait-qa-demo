@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Login — ShopRAIT</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+  <style>
+    .login-page {
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--bg);
+    }
+    .login-box {
+      width: 100%;
+      max-width: 400px;
+      padding: 0 24px;
+    }
+    .login-header {
+      text-align: center;
+      margin-bottom: 32px;
+    }
+    .login-header .logo {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 20px;
+      font-weight: 700;
+      margin-bottom: 16px;
+      color: var(--text);
+    }
+    .login-header .logo-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #60DFB1;
+    }
+    .login-header h1 {
+      font-size: 22px;
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+    .login-header p {
+      font-size: 14px;
+      color: var(--text-muted);
+    }
+    .login-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 28px;
+      box-shadow: var(--shadow-md);
+    }
+    .btn-login {
+      width: 100%;
+      height: 42px;
+      background: var(--charcoal);
+      color: var(--cream);
+      border: none;
+      border-radius: var(--radius-md);
+      font-family: var(--font-body);
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      margin-top: 8px;
+      transition: background 0.12s;
+    }
+    .btn-login:hover { background: #1a1915; }
+    .hint {
+      margin-top: 16px;
+      padding: 12px;
+      background: rgba(96,164,223,0.08);
+      border: 1px solid rgba(96,164,223,0.20);
+      border-radius: var(--radius-md);
+      font-size: 12px;
+      color: var(--text-muted);
+      font-family: var(--font-mono);
+    }
+    .error-msg {
+      display: none;
+      margin-top: 12px;
+      padding: 10px 12px;
+      background: rgba(223,100,96,0.10);
+      border: 1px solid rgba(223,100,96,0.25);
+      border-radius: var(--radius-md);
+      font-size: 13px;
+      color: #c94440;
+    }
+  </style>
+</head>
+<body>
+  <div class="login-page">
+    <div class="login-box">
+      <div class="login-header">
+        <div class="logo">
+          <span class="logo-dot"></span>
+          ShopRAIT
+        </div>
+        <h1>Welcome back</h1>
+        <p>Sign in to your account</p>
+      </div>
+      <div class="login-card">
+        <form id="login-form" onsubmit="handleLogin(event)">
+          <div class="form-group">
+            <label for="email">Email address</label>
+            <input
+              type="email"
+              id="email"
+              name="email"
+              placeholder="demo@rait.ai"
+              autocomplete="email"
+              required
+            >
+          </div>
+          <div class="form-group">
+            <label for="password">Password</label>
+            <input
+              type="password"
+              id="password"
+              name="password"
+              placeholder="••••••••"
+              autocomplete="current-password"
+              required
+            >
+          </div>
+          <button type="submit" class="btn-login" id="login-btn">Sign in</button>
+          <div class="error-msg" id="error-msg">
+            Invalid email or password. Try demo@rait.ai / password123
+          </div>
+        </form>
+        <div class="hint">
+          demo@rait.ai &nbsp;/&nbsp; password123
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ─── FLOW 3 DRIFT CONTROL ────────────────────────────────────────
+    // Normal:  redirects to /dashboard.html  (correct)
+    // Drifted: redirects to /products.html   (wrong — simulates bug)
+    //
+    // To trigger Flow 3: set localStorage.setItem('auth_drift', 'true')
+    // in the browser console, OR push checkout-drift-auth.html variant.
+    // ──────────────────────────────────────────────────────────────────
+    const REDIRECT_NORMAL  = 'dashboard.html';
+    const REDIRECT_DRIFTED = 'products.html';   // bug: wrong destination
+
+    function handleLogin(e) {
+      e.preventDefault();
+      const email    = document.getElementById('email').value.trim();
+      const password = document.getElementById('password').value;
+      const btn      = document.getElementById('login-btn');
+      const err      = document.getElementById('error-msg');
+
+      if (email === 'demo@rait.ai' && password === 'password123') {
+        btn.textContent = 'Signing in…';
+        btn.disabled = true;
+        err.style.display = 'none';
+        setTimeout(() => {
+          const isDrifted = localStorage.getItem('auth_drift') === 'true';
+          window.location.href = isDrifted ? REDIRECT_DRIFTED : REDIRECT_NORMAL;
+        }, 600);
+      } else {
+        err.style.display = 'block';
+      }
+    }
+  </script>
+</body>
+</html>

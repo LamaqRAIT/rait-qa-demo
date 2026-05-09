@@ -1,0 +1,54 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400&display=swap');
+
+/* ── Design tokens as CSS variables ── */
+:root {
+  --cream:    #FFFFEB;
+  --green:    #60DFB1;
+  --blue:     #60A4DF;
+  --yellow:   #DFD660;
+  --red:      #DF6460;
+  --charcoal: #0E0804;
+
+  --bg-canvas:   #0E0804;
+  --bg-surface:  #161310;
+  --bg-card:     #1E1A15;
+  --bg-elevated: #252018;
+  --bg-bash:     #0B0907;
+
+  --text-primary: #FFFFEB;
+  --text-muted:   rgba(255,255,235,0.55);
+  --text-subtle:  rgba(255,255,235,0.30);
+
+  --border:        rgba(255,255,235,0.08);
+  --border-soft:   rgba(255,255,235,0.04);
+  --border-bash:   rgba(255,255,235,0.12);
+}
+
+* { box-sizing: border-box; }
+
+body {
+  background: var(--bg-canvas);
+  color: var(--text-primary);
+  font-family: 'Inter', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,235,0.12); border-radius: 3px; }
+
+/* ── Node graph base styles (ReactFlow overrides) ── */
+.react-flow__background { background: var(--bg-canvas); }
+.react-flow__edge-path  { stroke: rgba(96,164,223,0.4); stroke-width: 1.5; }
+.react-flow__edge-path.animated {
+  stroke: var(--blue);
+  stroke-dasharray: 5;
+  animation: dashdraw 0.6s linear infinite;
+}
+@keyframes dashdraw { to { stroke-dashoffset: -10; } }

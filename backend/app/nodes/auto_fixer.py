@@ -12,8 +12,18 @@ TEST_FILE_PATH = "backend/tests/suite/test_checkout.py"
 LOGIN_FILE_PATH = "backend/tests/suite/test_login.py"
 
 
+_KNOWN_TEST_FILES = {
+    "test_checkout.py": "backend/tests/suite/test_checkout.py",
+    "test_login.py": "backend/tests/suite/test_login.py",
+}
+
+
 def _repo_path(local_path: str) -> str:
-    """Convert a path relative to backend/ to a full repo path."""
+    """Normalize any LLM-generated test file path to the correct GitHub repo path."""
+    import os
+    basename = os.path.basename(local_path)
+    if basename in _KNOWN_TEST_FILES:
+        return _KNOWN_TEST_FILES[basename]
     if not local_path.startswith("backend/"):
         return f"backend/{local_path.lstrip('/')}"
     return local_path

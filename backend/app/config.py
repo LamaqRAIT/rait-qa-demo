@@ -4,6 +4,7 @@ from functools import lru_cache
 
 class Settings(BaseSettings):
     google_api_key: str = ""
+    groq_api_key: str = ""
     database_url: str = "sqlite+aiosqlite:///./demo.db"
     base_url: str = "https://lamaqrait.github.io/rait-qa-demo"
     playwright_timeout: int = 20000

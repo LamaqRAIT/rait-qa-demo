@@ -10,6 +10,32 @@ import google.generativeai as genai
 from app.config import get_settings
 from app.core.state import TriageResult
 
+
+async def _call_groq(prompt: str, api_key: str) -> tuple[str, int, int]:
+    """Call Groq API. Returns (text, input_tokens, output_tokens)."""
+    from groq import AsyncGroq
+    client = AsyncGroq(api_key=api_key)
+    resp = await client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.1,
+        max_tokens=512,
+    )
+    text = resp.choices[0].message.content or ""
+    usage = resp.usage
+    return text, (usage.prompt_tokens if usage else 0), (usage.completion_tokens if usage else 0)
+
+
+async def _call_gemini(prompt: str, model_name: str) -> tuple[str, int, int]:
+    """Call Gemini API. Returns (text, input_tokens, output_tokens)."""
+    model = genai.GenerativeModel(model_name)
+    response = await model.generate_content_async(prompt)
+    raw = response.text
+    usage = getattr(response, "usage_metadata", None)
+    input_tok = getattr(usage, "prompt_token_count", 0) if usage else 0
+    output_tok = getattr(usage, "candidates_token_count", 0) if usage else 0
+    return raw, input_tok, output_tok
+
 log = structlog.get_logger()
 
 TRIAGE_PROMPT = """You are a QA triage agent. Classify the following test failures based on all available evidence.
@@ -67,10 +93,8 @@ async def triage(
     evidence: dict,
 ) -> TriageResult:
     settings = get_settings()
-    genai.configure(api_key=settings.google_api_key)
-
-    # Try models in order until one succeeds (handles per-model quota limits)
-    _MODELS = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-8b"]
+    if settings.google_api_key:
+        genai.configure(api_key=settings.google_api_key)
 
     prompt = TRIAGE_PROMPT.format(
         failures=json.dumps(failures, indent=2),
@@ -84,32 +108,38 @@ async def triage(
     if lf:
         trace = lf.trace(name="triage", metadata={"run_id": run_id})
 
+    raw = ""
+    used_model = "groq/llama-3.3-70b-versatile"
+    input_tokens = output_tokens = 0
+
     try:
-        response = None
-        used_model = _MODELS[0]
-        last_exc = None
-        for model_name in _MODELS:
-            try:
-                model = genai.GenerativeModel(model_name)
-                for attempt in range(3):
-                    try:
-                        response = await model.generate_content_async(prompt)
-                        used_model = model_name
-                        break
-                    except Exception as e:
-                        if "429" in str(e) and attempt < 2:
-                            await asyncio.sleep(15 * (attempt + 1))
-                        else:
-                            raise
-                if response is not None:
+        # 1st choice: Groq (generous free tier, fast)
+        if settings.groq_api_key:
+            raw, input_tokens, output_tokens = await _call_groq(prompt, settings.groq_api_key)
+            used_model = "groq/llama-3.3-70b-versatile"
+            log.info("triage.groq_ok", run_id=run_id, tokens=input_tokens + output_tokens)
+        elif settings.google_api_key:
+            # Gemini fallback — try models with 1 retry on 429
+            for model_name in ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]:
+                try:
+                    for attempt in range(2):
+                        try:
+                            raw, input_tokens, output_tokens = await _call_gemini(prompt, model_name)
+                            used_model = model_name
+                            break
+                        except Exception as e:
+                            if "429" in str(e) and attempt == 0:
+                                await asyncio.sleep(15)
+                            else:
+                                raise
                     break
-            except Exception as e:
-                last_exc = e
-                log.warning("triage.model_failed", model=model_name, error=str(e)[:120])
-                continue
-        if response is None:
-            raise last_exc or RuntimeError("All Gemini models exhausted")
-        raw = response.text.strip()
+                except Exception as e:
+                    log.warning("triage.gemini_model_failed", model=model_name, error=str(e)[:80])
+                    continue
+        else:
+            raise RuntimeError("No LLM API key configured (GROQ_API_KEY or GOOGLE_API_KEY)")
+
+        raw = raw.strip()
         raw = re.sub(r"^```json?\s*", "", raw)
         raw = re.sub(r"\s*```$", "", raw)
         result = json.loads(raw)
@@ -118,11 +148,7 @@ async def triage(
         confidence = float(result.get("confidence", 0.5))
         evidence_text = result.get("evidence", "")
         proposed_fix = result.get("proposed_fix")
-
-        usage = getattr(response, "usage_metadata", None)
-        input_tokens = getattr(usage, "prompt_token_count", 0) if usage else 0
-        output_tokens = getattr(usage, "candidates_token_count", 0) if usage else 0
-        cost_usd = (input_tokens * 0.000000075) + (output_tokens * 0.0000003)
+        cost_usd = (input_tokens * 0.000000059) + (output_tokens * 0.000000079)
 
         if trace:
             trace.generation(
@@ -138,6 +164,7 @@ async def triage(
         log.info(
             "triage.done",
             run_id=run_id,
+            model=used_model,
             classification=classification,
             confidence=confidence,
             tokens_in=input_tokens,
@@ -152,7 +179,7 @@ async def triage(
         )
 
     except Exception as exc:
-        log.error("triage.error", run_id=run_id, error=str(exc))
+        log.error("triage.error", run_id=run_id, error=str(exc)[:200])
         if trace:
             lf.flush()
         return TriageResult(

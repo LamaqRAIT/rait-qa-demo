@@ -25,9 +25,8 @@ Be specific about what failed, why, and what action was taken."""
 
 async def generate_report(run: RunRecord) -> str:
     settings = get_settings()
-    if not settings.google_api_key:
+    if not settings.groq_api_key and not settings.google_api_key:
         return _fallback_report(run)
-    genai.configure(api_key=settings.google_api_key)
     prompt = REPORT_PROMPT.format(
         classification=run.triage.classification,
         confidence=run.triage.confidence,
@@ -36,24 +35,28 @@ async def generate_report(run: RunRecord) -> str:
         pr_url=run.pr_url or "none",
         auto_fixed=bool(run.pr_url),
     )
-    _MODELS = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-8b"]
     try:
-        for model_name in _MODELS:
-            try:
-                m = genai.GenerativeModel(model_name)
-                for attempt in range(2):
-                    try:
-                        response = await m.generate_content_async(prompt)
-                        return response.text.strip()
-                    except Exception as e:
-                        if "429" in str(e) and attempt == 0:
-                            await asyncio.sleep(15)
-                        else:
-                            raise
-            except Exception:
-                continue
+        if settings.groq_api_key:
+            from groq import AsyncGroq
+            client = AsyncGroq(api_key=settings.groq_api_key)
+            resp = await client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_tokens=256,
+            )
+            return resp.choices[0].message.content.strip()
+        elif settings.google_api_key:
+            genai.configure(api_key=settings.google_api_key)
+            for model_name in ["gemini-2.0-flash", "gemini-1.5-flash"]:
+                try:
+                    m = genai.GenerativeModel(model_name)
+                    resp = await m.generate_content_async(prompt)
+                    return resp.text.strip()
+                except Exception:
+                    continue
     except Exception as exc:
-        log.warning("reporter.gemini_error", run_id=run.id, error=str(exc))
+        log.warning("reporter.llm_error", run_id=run.id, error=str(exc)[:120])
     return _fallback_report(run)
 
 

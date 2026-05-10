@@ -62,16 +62,23 @@ async def auto_fix(run: RunRecord) -> str | None:
             return None
 
         patched = content.replace(old_str, new_str, 1)
-        branch_name = f"qa-agent/heal-{run.id[:8]}"
+        branch_name = "qa-agent/auto-heal"
+        main_sha = repo.get_branch("main").commit.sha
 
+        # Create or reset the fixed branch to current main HEAD
         try:
-            main_sha = repo.get_branch("main").commit.sha
-            repo.create_git_ref(f"refs/heads/{branch_name}", main_sha)
+            ref = repo.get_git_ref(f"heads/{branch_name}")
+            ref.edit(main_sha, force=True)
+            log.info("auto_fixer.branch_reset", run_id=run.id, branch=branch_name)
         except GithubException as e:
-            if e.status == 422:
-                log.info("auto_fixer.branch_exists", run_id=run.id, branch=branch_name)
+            if e.status == 404:
+                repo.create_git_ref(f"refs/heads/{branch_name}", main_sha)
+                log.info("auto_fixer.branch_created", run_id=run.id, branch=branch_name)
             else:
                 raise
+
+        # Re-fetch file from the branch we just reset (SHA may differ from main)
+        branch_file = repo.get_contents(file_path, ref=branch_name)
 
         repo.update_file(
             path=file_path,
@@ -82,27 +89,35 @@ async def auto_fix(run: RunRecord) -> str | None:
                 f"Evidence: {run.triage.evidence}"
             ),
             content=patched,
-            sha=file_obj.sha,
+            sha=branch_file.sha,
             branch=branch_name,
         )
 
-        pr = repo.create_pull(
-            title=f"[QA Agent] Auto-heal selector: {old_str[:40]} → {new_str[:40]}",
-            body=(
-                f"**Automated fix by RAIT QA Agent**\n\n"
-                f"| Field | Value |\n"
-                f"|---|---|\n"
-                f"| Run ID | `{run.id}` |\n"
-                f"| Classification | `{run.triage.classification}` |\n"
-                f"| Confidence | `{run.triage.confidence:.2f}` |\n"
-                f"| Evidence | {run.triage.evidence} |\n\n"
-                f"**Proposed change:**\n"
-                f"```diff\n- {old_str}\n+ {new_str}\n```\n\n"
-                f"Review and merge to apply the fix."
-            ),
-            head=branch_name,
-            base="main",
-        )
+        # Check for an existing open PR from this branch to avoid duplicates
+        existing_prs = repo.get_pulls(state="open", head=f"{settings.github_repo_owner}:{branch_name}", base="main")
+        existing_pr = next(iter(existing_prs), None)
+
+        if existing_pr:
+            log.info("auto_fixer.pr_updated", run_id=run.id, pr_url=existing_pr.html_url)
+            pr = existing_pr
+        else:
+            pr = repo.create_pull(
+                title=f"[QA Agent] Auto-heal: {old_str[:50]} → {new_str[:50]}",
+                body=(
+                    f"**Automated fix by RAIT QA Agent**\n\n"
+                    f"| Field | Value |\n"
+                    f"|---|---|\n"
+                    f"| Run ID | `{run.id}` |\n"
+                    f"| Classification | `{run.triage.classification}` |\n"
+                    f"| Confidence | `{run.triage.confidence:.2f}` |\n"
+                    f"| Evidence | {run.triage.evidence} |\n\n"
+                    f"**Proposed change:**\n"
+                    f"```diff\n- {old_str}\n+ {new_str}\n```\n\n"
+                    f"Review and merge to apply the fix."
+                ),
+                head=branch_name,
+                base="main",
+            )
 
         log.info(
             "auto_fixer.pr_opened",

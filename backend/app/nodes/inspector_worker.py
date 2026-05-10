@@ -104,7 +104,7 @@ def _fingerprint_scan(page, old_selector: str) -> list[dict]:
         if score < 0.10:
             continue
 
-        new_selector = _build_selector(el_cls, el_text, el_role, el_aria, el_testid, tag)
+        new_selector = _build_selector(el_cls, el_text, el_role, el_aria, el_testid, tag, old_classes)
         if new_selector:
             candidates.append({
                 "selector": new_selector,
@@ -141,14 +141,26 @@ def _extract_aria(selector: str) -> str:
     return m.group(1) if m else ""
 
 
-def _build_selector(cls: str, text: str, role: str, aria: str, testid: str, tag: str) -> str:
+def _build_selector(
+    cls: str, text: str, role: str, aria: str, testid: str, tag: str,
+    old_classes: list[str] | None = None,
+) -> str:
     if testid:
         return f"[data-testid='{testid}']"
     if aria:
         return f"[aria-label='{aria}']"
     if cls:
-        first_cls = cls.split()[0]
-        return f".{first_cls}"
+        classes = cls.split()
+        # Prefer a class that has structural similarity to old failing class
+        if old_classes:
+            best, best_score = classes[0], 0.0
+            for c in classes:
+                for oc in old_classes:
+                    s = difflib.SequenceMatcher(None, oc, c).ratio()
+                    if s > best_score and c not in ("btn", "button", "active", "disabled"):
+                        best_score, best = s, c
+            return f".{best}"
+        return f".{classes[0]}"
     if text and tag:
         return f"{tag}:has-text('{text[:30]}')"
     return ""

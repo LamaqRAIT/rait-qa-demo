@@ -89,9 +89,10 @@ def _parse_junit(results_path: str, raw_output: str) -> list[dict]:
 def _extract_selector(message: str) -> str:
     import re
     patterns = [
+        r"waiting for locator\([\"']([^\"']+)[\"']\)",
         r"selector '([^']+)'",
-        r'Locator\("([^"]+)"\)',
-        r"locator\('([^']+)'\)",
+        r'[Ll]ocator\("([^"]+)"\)',
+        r"[Ll]ocator\('([^']+)'\)",
         r"\.locator\(['\"]([^'\"]+)['\"]\)",
     ]
     for p in patterns:

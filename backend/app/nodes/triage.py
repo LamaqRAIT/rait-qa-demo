@@ -2,6 +2,7 @@
 Triage node — Gemini direct SDK + Langfuse observability.
 No LangChain. Classifies failures from evidence bundle.
 """
+import asyncio
 import json
 import re
 import structlog
@@ -67,7 +68,9 @@ async def triage(
 ) -> TriageResult:
     settings = get_settings()
     genai.configure(api_key=settings.google_api_key)
-    model = genai.GenerativeModel("gemini-2.0-flash")
+
+    # Try models in order until one succeeds (handles per-model quota limits)
+    _MODELS = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-8b"]
 
     prompt = TRIAGE_PROMPT.format(
         failures=json.dumps(failures, indent=2),
@@ -82,7 +85,30 @@ async def triage(
         trace = lf.trace(name="triage", metadata={"run_id": run_id})
 
     try:
-        response = await model.generate_content_async(prompt)
+        response = None
+        used_model = _MODELS[0]
+        last_exc = None
+        for model_name in _MODELS:
+            try:
+                model = genai.GenerativeModel(model_name)
+                for attempt in range(3):
+                    try:
+                        response = await model.generate_content_async(prompt)
+                        used_model = model_name
+                        break
+                    except Exception as e:
+                        if "429" in str(e) and attempt < 2:
+                            await asyncio.sleep(15 * (attempt + 1))
+                        else:
+                            raise
+                if response is not None:
+                    break
+            except Exception as e:
+                last_exc = e
+                log.warning("triage.model_failed", model=model_name, error=str(e)[:120])
+                continue
+        if response is None:
+            raise last_exc or RuntimeError("All Gemini models exhausted")
         raw = response.text.strip()
         raw = re.sub(r"^```json?\s*", "", raw)
         raw = re.sub(r"\s*```$", "", raw)
@@ -101,7 +127,7 @@ async def triage(
         if trace:
             trace.generation(
                 name="triage_call",
-                model="gemini-2.0-flash",
+                model=used_model,
                 input=prompt[:2000],
                 output=raw[:1000],
                 usage={"input": input_tokens, "output": output_tokens},

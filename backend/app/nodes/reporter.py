@@ -2,6 +2,7 @@
 Reporter node — formats the final run summary using Gemini.
 Updates run status in DB to complete or failed.
 """
+import asyncio
 import json
 import structlog
 import google.generativeai as genai
@@ -27,7 +28,6 @@ async def generate_report(run: RunRecord) -> str:
     if not settings.google_api_key:
         return _fallback_report(run)
     genai.configure(api_key=settings.google_api_key)
-    model = genai.GenerativeModel("gemini-2.0-flash")
     prompt = REPORT_PROMPT.format(
         classification=run.triage.classification,
         confidence=run.triage.confidence,
@@ -36,12 +36,25 @@ async def generate_report(run: RunRecord) -> str:
         pr_url=run.pr_url or "none",
         auto_fixed=bool(run.pr_url),
     )
+    _MODELS = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-8b"]
     try:
-        response = await model.generate_content_async(prompt)
-        return response.text.strip()
+        for model_name in _MODELS:
+            try:
+                m = genai.GenerativeModel(model_name)
+                for attempt in range(2):
+                    try:
+                        response = await m.generate_content_async(prompt)
+                        return response.text.strip()
+                    except Exception as e:
+                        if "429" in str(e) and attempt == 0:
+                            await asyncio.sleep(15)
+                        else:
+                            raise
+            except Exception:
+                continue
     except Exception as exc:
         log.warning("reporter.gemini_error", run_id=run.id, error=str(exc))
-        return _fallback_report(run)
+    return _fallback_report(run)
 
 
 def _fallback_report(run: RunRecord) -> str:

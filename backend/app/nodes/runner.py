@@ -28,12 +28,24 @@ async def run_tests(run_id: str) -> list[dict]:
         f"--junit-xml={RESULTS_PATH}",
         "-v", "--tb=short",
         "--timeout=30",
+        "-p", "no:warnings",
         env=env,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    stdout, stderr = await proc.communicate()
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(),
+            timeout=120,
+        )
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        log.error("runner.timeout", run_id=run_id)
+        return [{"test": "suite", "raw": "Test suite timed out after 120s", "selector": "", "expected": "", "actual": ""}]
     output = stdout.decode() + stderr.decode()
+    if proc.returncode != 0:
+        log.warning("runner.failures", run_id=run_id, returncode=proc.returncode, output=output[:2000])
     log.info("runner.done", run_id=run_id, returncode=proc.returncode)
 
     return _parse_junit(RESULTS_PATH, output)

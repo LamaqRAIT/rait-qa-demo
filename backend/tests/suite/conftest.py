@@ -14,6 +14,13 @@ def base_url() -> str:
     return BASE_URL
 
 
+@pytest.fixture(autouse=True)
+def fast_timeouts(page: Page) -> None:
+    """Cap Playwright action/navigation timeout at 15s to keep CI runs short."""
+    page.set_default_timeout(15_000)
+    page.set_default_navigation_timeout(15_000)
+
+
 @pytest.fixture
 def page_with_base(page: Page, base_url: str):
     """Page fixture pre-navigated to the demo site base."""

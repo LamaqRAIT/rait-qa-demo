@@ -103,13 +103,19 @@ async def run_pipeline(run_id: str) -> None:
         evidence = build_evidence_bundle(failures, dom_report, recent_commits, test_history)
         run.evidence = evidence
 
-        await _set_node(run, "classifier", "running", "Classifying failures with Gemini…")
+        await _set_node(run, "classifier", "running", "Classifying failures with LLM…")
         t0 = time.time()
         await _transition(run, RunStatus.TRIAGING)
-        triage_result = await triage(run_id, failures, dom_report, evidence)
+        triage_result, trace_id, input_tok, output_tok, cost = await triage(run_id, failures, dom_report, evidence)
         run.triage = triage_result
         run.node_timings["classifier"] = round(time.time() - t0, 2)
         run.consecutive_failures += 1
+        if trace_id:
+            run.langfuse_trace_id = trace_id
+        run.input_tokens = input_tok
+        run.output_tokens = output_tok
+        run.cost_usd = cost
+        await db.update_run(run)
 
         if not check_cost_limit(run.cost_usd):
             await _set_node(run, "classifier", "failed", "Cost limit exceeded — aborting")

@@ -94,7 +94,8 @@ async def triage(
     failures: list[dict],
     dom_report: dict,
     evidence: dict,
-) -> TriageResult:
+) -> tuple[TriageResult, str | None, int, int, float]:
+    """Returns (TriageResult, langfuse_trace_id, input_tokens, output_tokens, cost_usd)."""
     settings = get_settings()
     if settings.google_api_key:
         genai.configure(api_key=settings.google_api_key)
@@ -174,20 +175,17 @@ async def triage(
             tokens_out=output_tokens,
         )
 
-        return TriageResult(
-            classification=classification,
-            confidence=confidence,
-            evidence=evidence_text,
-            proposed_fix=proposed_fix,
+        trace_id = trace.id if trace else None
+        return (
+            TriageResult(classification=classification, confidence=confidence, evidence=evidence_text, proposed_fix=proposed_fix),
+            trace_id, input_tokens, output_tokens, cost_usd,
         )
 
     except Exception as exc:
         log.error("triage.error", run_id=run_id, error=str(exc)[:200])
         if trace:
             lf.flush()
-        return TriageResult(
-            classification="env",
-            confidence=0.5,
-            evidence=f"Triage failed: {exc}",
-            proposed_fix=None,
+        return (
+            TriageResult(classification="env", confidence=0.5, evidence=f"Triage failed: {exc}", proposed_fix=None),
+            None, 0, 0, 0.0,
         )

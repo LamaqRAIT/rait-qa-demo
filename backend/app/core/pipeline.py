@@ -126,7 +126,7 @@ async def run_pipeline(run_id: str) -> None:
         confidence = triage_result.confidence
         threshold = settings.auto_fix_threshold
 
-        if classification == "drift" and confidence >= threshold:
+        if classification == "drift" and (confidence >= threshold and not run.force_hitl):
             await _set_node(
                 run, "classifier", "success",
                 f"DRIFT — confidence {confidence:.2f} — auto-fix eligible",
@@ -137,9 +137,10 @@ async def run_pipeline(run_id: str) -> None:
             await _apply_fix_and_complete(run)
 
         elif classification == "drift":
+            reason = "forced to human review for demo" if run.force_hitl else f"below threshold ({threshold:.2f}), escalating to human"
             await _set_node(
                 run, "classifier", "waiting",
-                f"DRIFT — confidence {confidence:.2f} — below threshold, escalating to human",
+                f"DRIFT — confidence {confidence:.2f} — {reason}",
             )
             await _set_node(run, "human_review", "waiting", "Awaiting human approval")
             await _transition(run, RunStatus.AWAITING_HUMAN)

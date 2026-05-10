@@ -63,10 +63,10 @@ export default function Dashboard() {
   };
 
   // ── Demo drift injection ───────────────────────────────────────────────
-  async function handleInjectDrift(flow: string) {
+  async function handleInjectDrift(flow: string, hitl = false) {
     setTriggering(true);
     try {
-      const { run_id } = await injectDrift(flow);
+      const { run_id } = await injectDrift(flow, hitl);
       await loadRuns();
       const newRun = (await fetchRuns()).find((r: QARun) => r.id === run_id);
       if (newRun) {
@@ -119,9 +119,9 @@ export default function Dashboard() {
             </p>
             <div className="space-y-2">
               {[
-                { label: "Inject Drift — CSS Rename", flow: "flow1" },
-                { label: "Inject Drift — Text Change", flow: "flow2" },
-                { label: "Inject Bug — Wrong Route", flow: "flow3" },
+                { label: "Flow 1 — Selector drift", flow: "flow1" },
+                { label: "Flow 2 — Text drift", flow: "flow2" },
+                { label: "Flow 3 — Login bug", flow: "flow3" },
               ].map(({ label, flow }) => (
                 <button
                   key={flow}
@@ -136,6 +136,19 @@ export default function Dashboard() {
                   {triggering ? "Starting…" : label}
                 </button>
               ))}
+              <div className="border-t border-cream/8 my-2" />
+              <p className="text-[10px] text-cream/25 uppercase tracking-widest mb-1">Human-in-the-loop</p>
+              <button
+                onClick={() => handleInjectDrift("flow1", true)}
+                disabled={triggering}
+                className={clsx(
+                  "w-full text-left px-3 py-2 rounded-md text-[12px] transition",
+                  "border border-yellow/25 bg-yellow/5 text-yellow/70",
+                  "hover:bg-yellow/10 hover:text-yellow hover:border-yellow/40 disabled:opacity-40"
+                )}
+              >
+                {triggering ? "Starting…" : "Flow 1 — Needs Approval ↗"}
+              </button>
               <button
                 onClick={handleReset}
                 className={clsx(

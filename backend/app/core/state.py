@@ -56,6 +56,7 @@ class RunRecord:
     human_override: bool = False
     override_reason: str | None = None
     consecutive_failures: int = 0
+    force_hitl: bool = False
     created_at: datetime = field(default_factory=datetime.utcnow)
     updated_at: datetime = field(default_factory=datetime.utcnow)
 
@@ -89,6 +90,7 @@ class RunRecord:
             "human_override": self.human_override,
             "override_reason": self.override_reason,
             "consecutive_failures": self.consecutive_failures,
+            "force_hitl": self.force_hitl,
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
         }
@@ -126,6 +128,7 @@ class RunRecord:
             human_override=d.get("human_override", False),
             override_reason=d.get("override_reason"),
             consecutive_failures=d.get("consecutive_failures", 0),
+            force_hitl=d.get("force_hitl", False),
             created_at=datetime.fromisoformat(d["created_at"]) if d.get("created_at") else datetime.utcnow(),
             updated_at=datetime.fromisoformat(d["updated_at"]) if d.get("updated_at") else datetime.utcnow(),
         )

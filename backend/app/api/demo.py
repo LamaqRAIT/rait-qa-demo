@@ -126,6 +126,7 @@ async def _wait_for_pages_deployment(expected_sha: str, timeout: int = 120) -> b
 @router.post("/demo/inject-drift")
 async def inject_drift(
     flow: str = "flow1",
+    hitl: bool = False,
     background_tasks: BackgroundTasks = None,
 ):
     if flow not in FLOW_CONFIGS:
@@ -139,6 +140,7 @@ async def inject_drift(
         status=RunStatus.PLANNING,
         trigger_commit="inject-drift",
         trigger_branch="main",
+        force_hitl=hitl,
     )
     await db.create_run(run)
 
@@ -146,11 +148,12 @@ async def inject_drift(
 
     background_tasks.add_task(_inject_and_run, run_id, flow)
 
-    log.info("demo.inject_drift", flow=flow, run_id=run_id, description=config["description"])
+    log.info("demo.inject_drift", flow=flow, run_id=run_id, hitl=hitl, description=config["description"])
     return {
         "run_id": run_id,
         "status": "started",
         "flow": flow,
+        "hitl": hitl,
         "description": config["description"],
     }
 

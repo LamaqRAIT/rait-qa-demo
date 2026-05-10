@@ -36,8 +36,9 @@ export async function triggerManualRun(
   return res.json();
 }
 
-export async function injectDrift(flow: string): Promise<{ run_id: string; description: string }> {
-  const res = await fetch(`${API}/demo/inject-drift?flow=${flow}`, { method: "POST" });
+export async function injectDrift(flow: string, hitl = false): Promise<{ run_id: string; description: string }> {
+  const params = new URLSearchParams({ flow, ...(hitl ? { hitl: "true" } : {}) });
+  const res = await fetch(`${API}/demo/inject-drift?${params}`, { method: "POST" });
   if (!res.ok) throw new Error("Drift injection failed");
   return res.json();
 }

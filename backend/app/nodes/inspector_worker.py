@@ -32,6 +32,12 @@ def inspect_selectors(url: str, failing_selectors: list[str], timeout: int = 200
             return {"error": str(exc), "selectors": {}}
 
         for selector in failing_selectors:
+            if not selector:
+                continue
+            # URL assertions (wait_for_url type failures) — no DOM to inspect
+            if selector.startswith("http") or "wait_for_url" in selector:
+                results[selector] = {"found_on_page": False, "candidates": [], "note": "URL assertion — no DOM selector"}
+                continue
             try:
                 found_count = page.locator(selector).count()
                 if found_count > 0:
@@ -117,6 +123,8 @@ def _fingerprint_scan(page, old_selector: str) -> list[dict]:
 
 
 def _guess_tag(selector: str) -> str:
+    if selector.startswith("button") or "button" in selector.lower():
+        return "button"
     if selector.startswith(".btn") or "btn" in selector.lower():
         return "button"
     if selector.startswith("a") or selector.startswith("#"):
@@ -132,6 +140,9 @@ def _extract_classes(selector: str) -> list[str]:
 def _extract_text(selector: str) -> str:
     import re
     m = re.search(r"has-text\(['\"]([^'\"]+)['\"]\)", selector)
+    if m:
+        return m.group(1)
+    m = re.search(r":text\(['\"]([^'\"]+)['\"]\)", selector)
     return m.group(1) if m else ""
 
 

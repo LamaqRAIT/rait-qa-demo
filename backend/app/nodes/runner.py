@@ -89,11 +89,13 @@ def _parse_junit(results_path: str, raw_output: str) -> list[dict]:
 def _extract_selector(message: str) -> str:
     import re
     patterns = [
-        r"waiting for locator\([\"']([^\"']+)[\"']\)",
+        # double-quoted outer: allows single quotes inside (e.g. button:has-text('X'))
+        r'waiting for locator\("([^"]+)"\)',
+        # single-quoted outer: allows double quotes inside
+        r"waiting for locator\('([^']+)'\)",
         r"selector '([^']+)'",
         r'[Ll]ocator\("([^"]+)"\)',
         r"[Ll]ocator\('([^']+)'\)",
-        r"\.locator\(['\"]([^'\"]+)['\"]\)",
     ]
     for p in patterns:
         m = re.search(p, message)

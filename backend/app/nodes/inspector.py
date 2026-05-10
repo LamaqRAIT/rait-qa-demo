@@ -27,7 +27,13 @@ async def inspect_dom(run_id: str, failures: list[dict]) -> dict:
             if "selector" in raw.lower() or ".btn" in raw or "locator" in raw.lower():
                 selectors.append(raw[:100])
     if not selectors:
-        return {"inspected": False, "note": "No selectors to inspect"}
+        # Return a structured result even without selectors so triage has context
+        return {
+            "inspected": True,
+            "url": url,
+            "changed_selectors": [],
+            "note": "No DOM selectors in failures — possible URL/redirect or logic assertion failure",
+        }
 
     first_test = (failures[0].get("test") or "")
     if "login" in first_test:

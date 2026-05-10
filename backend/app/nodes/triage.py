@@ -59,9 +59,12 @@ Classify as exactly one of:
 
 Rules:
 - If a commit message mentions renaming a CSS class that matches the failing selector → high confidence DRIFT
+- If a commit message mentions changing text copy that matches the failing has-text selector → high confidence DRIFT
 - If DOM inspection found a candidate selector with confidence > 0.80 → strong evidence of DRIFT
 - If the selector still exists on the page (found_on_page=True) → cannot be DRIFT, likely BUG or ENV
+- If the failure is a URL/redirect assertion (wait_for_url, to_have_url) and the redirect destination changed in a commit → BUG (application behavior broke)
 - If multiple unrelated tests fail simultaneously → likely ENV
+- proposed_fix must be null for bug and env classifications
 
 Reply with ONLY valid JSON, no markdown fences:
 {{"classification": "drift"|"bug"|"env", "confidence": 0.0-1.0, "evidence": "one sentence explaining the primary signal", "proposed_fix": null | {{"file": "backend/tests/suite/test_checkout.py", "old": "old_selector_string", "new": "new_selector_string"}}}}

@@ -18,7 +18,7 @@ async def run_canary(run_id: str) -> dict:
         "tests/canary/",
         "-v", "--tb=short",
         "--timeout=30",
-        env={"BASE_URL": base_url, **__import__("os").environ},
+        env={**__import__("os").environ, "BASE_URL": base_url},
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )

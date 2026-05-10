@@ -25,5 +25,8 @@ async def run_canary(run_id: str) -> dict:
     stdout, stderr = await proc.communicate()
     passed = proc.returncode == 0
     output = stdout.decode() + stderr.decode()
-    log.info("canary.done", run_id=run_id, passed=passed)
+    if not passed:
+        log.warning("canary.failed", run_id=run_id, returncode=proc.returncode, output=output[:3000])
+    else:
+        log.info("canary.done", run_id=run_id, passed=passed)
     return {"passed": passed, "output": output[:2000]}

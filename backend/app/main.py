@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import hmac
 import json
 import uuid
 from contextlib import asynccontextmanager
@@ -12,10 +14,12 @@ from fastapi.responses import StreamingResponse
 
 import app.db as db
 from app.config import get_settings
-from app.models import QARun, WebhookPayload, ApprovalRequest
-from app.agents.pipeline import get_graph
-from app.agents.state import QAState
-from langgraph.types import Command
+from app.core.state import RunRecord, RunStatus
+from app.core.pipeline import run_pipeline
+from app.api.runs import router as runs_router
+from app.api.approve import router as approve_router
+from app.api.metrics import router as metrics_router
+from app.api.demo import router as demo_router
 
 log = structlog.get_logger()
 settings = get_settings()
@@ -29,7 +33,7 @@ async def lifespan(app: FastAPI):
     log.info("shutdown")
 
 
-app = FastAPI(title="RAIT QA Agent — Demo", lifespan=lifespan)
+app = FastAPI(title="RAIT QA Agent", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -39,36 +43,60 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(runs_router)
+app.include_router(approve_router)
+app.include_router(metrics_router)
+app.include_router(demo_router)
+
 
 # ── Health ────────────────────────────────────────────────────────────────────
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
+    return {"status": "ok", "timestamp": datetime.utcnow().isoformat(), "version": "2.0"}
 
 
-# ── Webhook ───────────────────────────────────────────────────────────────────
+# ── GitHub Webhook ────────────────────────────────────────────────────────────
 
 @app.post("/webhook")
-async def github_webhook(payload: WebhookPayload, background_tasks: BackgroundTasks):
+async def github_webhook(request: Request, background_tasks: BackgroundTasks):
+    body = await request.body()
+
+    if settings.github_webhook_secret:
+        sig = request.headers.get("X-Hub-Signature-256", "")
+        expected = "sha256=" + hmac.new(
+            settings.github_webhook_secret.encode(),
+            body,
+            hashlib.sha256,
+        ).hexdigest()  # type: ignore[attr-defined]
+        if not hmac.compare_digest(sig, expected):
+            raise HTTPException(status_code=403, detail="Invalid webhook signature")
+
+    try:
+        payload = json.loads(body)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    commit_sha = payload.get("after", "")
+    ref = payload.get("ref", "refs/heads/main")
+    branch = ref.replace("refs/heads/", "")
+
+    head_commit = payload.get("head_commit") or {}
+    commit_msg = head_commit.get("message", "")
+    if "[inject-drift]" in commit_msg or "[qa-agent-" in commit_msg:
+        log.info("webhook.skip_agent_commit", sha=commit_sha[:7], msg=commit_msg[:80])
+        return {"status": "skipped", "reason": "agent-generated commit"}
+
     run_id = str(uuid.uuid4())
-    commit_sha = payload.after or "manual"
-    branch = payload.ref.replace("refs/heads/", "")
-
-    changed_files: list[str] = []
-    for commit in payload.commits:
-        changed_files.extend(commit.get("modified", []))
-        changed_files.extend(commit.get("added", []))
-
-    run = QARun(
+    run = RunRecord(
         id=run_id,
-        status="planning",
-        trigger_commit=commit_sha,
+        status=RunStatus.PLANNING,
+        trigger_commit=commit_sha[:7] if commit_sha else "webhook",
         trigger_branch=branch,
     )
     await db.create_run(run)
-    background_tasks.add_task(_run_pipeline, run_id, commit_sha, branch, changed_files)
-    log.info("webhook.received", run_id=run_id, commit=commit_sha)
+    background_tasks.add_task(run_pipeline, run_id)
+    log.info("webhook.received", run_id=run_id, commit=commit_sha[:7], branch=branch)
     return {"run_id": run_id, "status": "started"}
 
 
@@ -76,63 +104,20 @@ async def github_webhook(payload: WebhookPayload, background_tasks: BackgroundTa
 async def manual_trigger(
     background_tasks: BackgroundTasks,
     scenario: str = "flow1",
-    changed_files: list[str] | None = None,
     commit_sha: str = "manual",
     branch: str = "main",
 ):
     run_id = str(uuid.uuid4())
-    run = QARun(id=run_id, status="planning",
-                trigger_commit=commit_sha, trigger_branch=branch)
+    run = RunRecord(
+        id=run_id,
+        status=RunStatus.PLANNING,
+        trigger_commit=commit_sha,
+        trigger_branch=branch,
+    )
     await db.create_run(run)
-    background_tasks.add_task(_run_pipeline, run_id, commit_sha, branch,
-                              changed_files or ["checkout.html"], scenario)
+    background_tasks.add_task(run_pipeline, run_id)
+    log.info("manual_trigger", run_id=run_id, scenario=scenario)
     return {"run_id": run_id, "status": "started", "scenario": scenario}
-
-
-async def _run_pipeline(
-    run_id: str,
-    commit_sha: str,
-    branch: str,
-    changed_files: list[str],
-    scenario: str = "flow1",
-) -> None:
-    run = await db.get_run(run_id)
-    if run:
-        run.status = "running"
-        await db.update_run(run)
-
-    initial_state: QAState = {
-        "run_id": run_id,
-        "trigger_commit": commit_sha,
-        "trigger_branch": branch,
-        "changed_files": changed_files,
-        "scenario": scenario,
-        "suites_to_run": [],
-        "junit_xml": "",
-        "failures": [],
-        "dom_report": {},
-        "classification": "",
-        "confidence": 0.0,
-        "evidence": "",
-        "proposed_fix": None,
-        "approved": False,
-        "approved_by": "",
-        "auto_fixed": False,
-        "commit_sha": "",
-        "report_path": "",
-        "error": None,
-    }
-
-    graph = get_graph()
-    config = {"configurable": {"thread_id": run_id}}
-    try:
-        await graph.ainvoke(initial_state, config=config)
-    except Exception as exc:
-        log.error("pipeline.error", run_id=run_id, error=str(exc))
-        run = await db.get_run(run_id)
-        if run:
-            run.status = "failed"
-            await db.update_run(run)
 
 
 # ── SSE Stream ────────────────────────────────────────────────────────────────
@@ -140,7 +125,8 @@ async def _run_pipeline(
 @app.get("/runs/{run_id}/stream")
 async def stream_run(run_id: str) -> StreamingResponse:
     async def event_generator() -> AsyncGenerator[str, None]:
-        terminal = {"complete", "failed"}
+        terminal = {RunStatus.COMPLETE, RunStatus.FAILED, RunStatus.QUARANTINED,
+                    "complete", "failed", "quarantined"}
         while True:
             run = await db.get_run(run_id)
             if run is None:
@@ -151,79 +137,29 @@ async def stream_run(run_id: str) -> StreamingResponse:
                 break
             await asyncio.sleep(1)
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache",
-                                      "X-Accel-Buffering": "no"})
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
-# ── Runs List ─────────────────────────────────────────────────────────────────
-
-@app.get("/runs")
-async def list_runs():
-    runs = await db.list_runs(limit=20)
-    return [r.to_dict() for r in runs]
-
-
-@app.get("/runs/{run_id}")
-async def get_run_detail(run_id: str):
-    run = await db.get_run(run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Run not found")
-    return run.to_dict()
-
-
-# ── Human Approval ────────────────────────────────────────────────────────────
-
-@app.post("/approve/{run_id}")
-async def approve_run(
-    run_id: str,
-    body: ApprovalRequest,
-    background_tasks: BackgroundTasks,
-):
-    run = await db.get_run(run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Run not found")
-    if run.status != "awaiting_human":
-        raise HTTPException(status_code=409,
-                            detail=f"Run is in status '{run.status}', not awaiting_human")
-
-    run.approved_by = body.reviewer_name
-    run.status = "healing"
-    await db.update_run(run)
-
-    background_tasks.add_task(_resume_pipeline, run_id, body)
-    log.info("approval.received", run_id=run_id, approved=body.approved,
-             reviewer=body.reviewer_name)
-    return {"status": "resumed", "approved": body.approved}
-
-
-async def _resume_pipeline(run_id: str, body: ApprovalRequest) -> None:
-    graph = get_graph()
-    config = {"configurable": {"thread_id": run_id}}
-    try:
-        await graph.ainvoke(
-            Command(resume={"approved": body.approved,
-                            "reviewer_name": body.reviewer_name}),
-            config=config,
-        )
-    except Exception as exc:
-        log.error("resume.error", run_id=run_id, error=str(exc))
-
-
-# ── Git Log (stub for Phase 1) ────────────────────────────────────────────────
+# ── Git Log ───────────────────────────────────────────────────────────────────
 
 @app.get("/git/log")
 async def git_log():
+    settings = get_settings()
     try:
-        import git
-        repo = git.Repo(search_parent_directories=True)
-        commits = list(repo.iter_commits(max_count=5))
+        from github import Github
+        gh = Github(settings.github_token)
+        repo = gh.get_repo(f"{settings.github_repo_owner}/{settings.github_repo_name}")
+        commits = list(repo.get_commits()[:5])
         return [
             {
-                "sha": c.hexsha[:7],
-                "message": c.message.strip().split("\n")[0][:80],
-                "author": c.author.name,
-                "ago": _time_ago(c.committed_datetime),
+                "sha": c.sha[:7],
+                "message": c.commit.message.strip().split("\n")[0][:80],
+                "author": c.commit.author.name,
+                "ago": _time_ago(c.commit.author.date),
             }
             for c in commits
         ]
@@ -232,7 +168,11 @@ async def git_log():
 
 
 def _time_ago(dt: datetime) -> str:
-    diff = datetime.now(dt.tzinfo) - dt
+    from datetime import timezone
+    now = datetime.now(timezone.utc)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    diff = now - dt
     if diff.seconds < 60:
         return "just now"
     if diff.seconds < 3600:

@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { clsx } from "clsx";
 import type { QARun } from "@/lib/types";
-import { fetchRuns, createRunStream, triggerManualRun } from "@/lib/api";
+import { fetchRuns, createRunStream, injectDrift, resetDemo } from "@/lib/api";
 import { NodeGraph } from "@/components/NodeGraph";
 import { TicketList } from "@/components/TicketList";
 import { ApprovalQueue } from "@/components/ApprovalQueue";
@@ -62,13 +62,13 @@ export default function Dashboard() {
     setDrawerRun(null);
   };
 
-  // ── Manual trigger ───────────────────────────────────────────────────────
-  async function handleTrigger(files: string[]) {
+  // ── Demo drift injection ───────────────────────────────────────────────
+  async function handleInjectDrift(flow: string) {
     setTriggering(true);
     try {
-      const { run_id } = await triggerManualRun(files);
+      const { run_id } = await injectDrift(flow);
       await loadRuns();
-      const newRun = (await fetchRuns()).find((r) => r.id === run_id);
+      const newRun = (await fetchRuns()).find((r: QARun) => r.id === run_id);
       if (newRun) {
         handleSelectRun(newRun);
         setTab("runs");
@@ -76,6 +76,10 @@ export default function Dashboard() {
     } finally {
       setTriggering(false);
     }
+  }
+
+  async function handleReset() {
+    await resetDemo();
   }
 
   const pendingApproval = runs.find((r) => r.status === "awaiting_human") ?? null;
@@ -115,13 +119,13 @@ export default function Dashboard() {
             </p>
             <div className="space-y-2">
               {[
-                { label: "Flow 1 — Selector drift", files: ["checkout.html"] },
-                { label: "Flow 2 — Text drift", files: ["checkout.html"] },
-                { label: "Flow 3 — Login bug", files: ["auth.js"] },
-              ].map(({ label, files }) => (
+                { label: "Inject Drift — CSS Rename", flow: "flow1" },
+                { label: "Inject Drift — Text Change", flow: "flow2" },
+                { label: "Inject Bug — Wrong Route", flow: "flow3" },
+              ].map(({ label, flow }) => (
                 <button
-                  key={label}
-                  onClick={() => handleTrigger(files)}
+                  key={flow}
+                  onClick={() => handleInjectDrift(flow)}
                   disabled={triggering}
                   className={clsx(
                     "w-full text-left px-3 py-2 rounded-md text-[12px] transition",
@@ -132,6 +136,16 @@ export default function Dashboard() {
                   {triggering ? "Starting…" : label}
                 </button>
               ))}
+              <button
+                onClick={handleReset}
+                className={clsx(
+                  "w-full text-left px-3 py-2 rounded-md text-[12px] transition",
+                  "border border-cream/8 bg-card hover:bg-surface text-cream/40",
+                  "hover:text-cream/70 hover:border-cream/15"
+                )}
+              >
+                Reset Demo Site
+              </button>
             </div>
           </div>
 
@@ -153,6 +167,30 @@ export default function Dashboard() {
                   <span className="text-cream/40">Branch</span>
                   <span className="font-mono text-cream/60">{activeRun.trigger_branch}</span>
                 </div>
+                {activeRun.pr_url && (
+                  <div className="mt-2 pt-2 border-t border-cream/8">
+                    <a
+                      href={activeRun.pr_url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-[12px] text-blue/80 hover:text-blue underline"
+                    >
+                      View PR on GitHub →
+                    </a>
+                  </div>
+                )}
+                {activeRun.langfuse_trace_id && (
+                  <div className="mt-1">
+                    <a
+                      href={`https://us.cloud.langfuse.com/trace/${activeRun.langfuse_trace_id}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-[12px] text-cream/40 hover:text-cream/70 underline"
+                    >
+                      View LLM Trace →
+                    </a>
+                  </div>
+                )}
               </div>
             ) : (
               <p className="text-[12px] text-cream/25">No active run</p>
@@ -161,7 +199,7 @@ export default function Dashboard() {
 
           {/* Git log */}
           <div className="p-4 border-t border-cream/8">
-            <GitLogPanel latestCommitSha={activeRun?.commit_sha} />
+            <GitLogPanel />
           </div>
         </aside>
 

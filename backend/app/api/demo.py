@@ -1,0 +1,215 @@
+"""
+Demo drift injection endpoint.
+Pushes a real git commit to demo-site/checkout.html (or login.html) via PyGithub API,
+then immediately starts the QA pipeline.
+POST /demo/inject-drift?flow=flow1|flow2|flow3
+POST /demo/reset — reverts any pending drift commit
+"""
+import asyncio
+import uuid
+from datetime import datetime
+from fastapi import APIRouter, BackgroundTasks, HTTPException
+import structlog
+import app.db as db
+from app.config import get_settings
+from app.core.state import RunRecord, RunStatus
+from app.core.pipeline import run_pipeline
+
+log = structlog.get_logger()
+router = APIRouter()
+
+FLOW_CONFIGS = {
+    "flow1": {
+        "file": "demo-site/checkout.html",
+        "description": "CSS class rename: btn-checkout → btn-place-order",
+        "find": 'class="btn btn-checkout"',
+        "replace": 'class="btn btn-place-order"',
+        "revert_find": 'class="btn btn-place-order"',
+        "revert_replace": 'class="btn btn-checkout"',
+        "commit_msg": "refactor(ui): rename btn-checkout to btn-place-order [inject-drift]",
+        "revert_msg": "revert(ui): restore btn-checkout class name [qa-agent-reset]",
+    },
+    "flow2": {
+        "file": "demo-site/checkout.html",
+        "description": "Button text copy change: Submit Order → Place Order",
+        "find": ">Submit Order<",
+        "replace": ">Place Order<",
+        "revert_find": ">Place Order<",
+        "revert_replace": ">Submit Order<",
+        "commit_msg": "copy(ui): update checkout button text to Place Order [inject-drift]",
+        "revert_msg": "revert(ui): restore checkout button text [qa-agent-reset]",
+    },
+    "flow3": {
+        "file": "demo-site/login.html",
+        "description": "Login redirect bug: dashboard.html → products.html",
+        "find": "dashboard.html",
+        "replace": "products.html",
+        "revert_find": "products.html",
+        "revert_replace": "dashboard.html",
+        "commit_msg": "fix(auth): update login redirect destination [inject-drift]",
+        "revert_msg": "revert(auth): restore correct login redirect [qa-agent-reset]",
+    },
+}
+
+_active_drift: dict[str, str | None] = {"flow": None}
+
+
+def _get_gh_repo():
+    from github import Github
+    settings = get_settings()
+    gh = Github(settings.github_token)
+    return gh.get_repo(f"{settings.github_repo_owner}/{settings.github_repo_name}")
+
+
+async def _push_change(flow: str, direction: str) -> str:
+    config = FLOW_CONFIGS[flow]
+    find = config["find"] if direction == "inject" else config["revert_find"]
+    replace = config["replace"] if direction == "inject" else config["revert_replace"]
+    msg = config["commit_msg"] if direction == "inject" else config["revert_msg"]
+    file_path = config["file"]
+
+    def _do_push():
+        repo = _get_gh_repo()
+        file_obj = repo.get_contents(file_path)
+        content = file_obj.decoded_content.decode("utf-8")
+        if find not in content:
+            return None
+        patched = content.replace(find, replace, 1)
+        result = repo.update_file(
+            path=file_path,
+            message=msg,
+            content=patched,
+            sha=file_obj.sha,
+        )
+        return result["commit"].sha
+
+    loop = asyncio.get_event_loop()
+    sha = await loop.run_in_executor(None, _do_push)
+    return sha or ""
+
+
+async def _wait_for_pages_deployment(expected_sha: str, timeout: int = 120) -> bool:
+    settings = get_settings()
+    import httpx
+    deadline = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < deadline:
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(
+                    f"https://api.github.com/repos/{settings.github_repo_owner}"
+                    f"/{settings.github_repo_name}/deployments",
+                    headers={
+                        "Authorization": f"token {settings.github_token}",
+                        "Accept": "application/vnd.github+json",
+                    },
+                    params={"environment": "github-pages", "per_page": 1},
+                )
+                deployments = resp.json()
+                if deployments:
+                    dep_id = deployments[0]["id"]
+                    statuses_resp = await client.get(
+                        f"https://api.github.com/repos/{settings.github_repo_owner}"
+                        f"/{settings.github_repo_name}/deployments/{dep_id}/statuses",
+                        headers={
+                            "Authorization": f"token {settings.github_token}",
+                            "Accept": "application/vnd.github+json",
+                        },
+                    )
+                    statuses = statuses_resp.json()
+                    if statuses and statuses[0].get("state") == "success":
+                        log.info("demo.pages_deployed", sha=expected_sha)
+                        return True
+        except Exception as exc:
+            log.warning("demo.pages_poll_error", error=str(exc))
+        await asyncio.sleep(8)
+    log.warning("demo.pages_timeout", timeout=timeout)
+    return False
+
+
+@router.post("/demo/inject-drift")
+async def inject_drift(
+    flow: str = "flow1",
+    background_tasks: BackgroundTasks = None,
+):
+    if flow not in FLOW_CONFIGS:
+        raise HTTPException(status_code=400, detail=f"Unknown flow: {flow}. Choose flow1, flow2, or flow3.")
+
+    config = FLOW_CONFIGS[flow]
+    run_id = str(uuid.uuid4())
+
+    run = RunRecord(
+        id=run_id,
+        status=RunStatus.PLANNING,
+        trigger_commit="inject-drift",
+        trigger_branch="main",
+    )
+    await db.create_run(run)
+
+    _active_drift["flow"] = flow
+
+    background_tasks.add_task(_inject_and_run, run_id, flow)
+
+    log.info("demo.inject_drift", flow=flow, run_id=run_id, description=config["description"])
+    return {
+        "run_id": run_id,
+        "status": "started",
+        "flow": flow,
+        "description": config["description"],
+    }
+
+
+async def _inject_and_run(run_id: str, flow: str) -> None:
+    run = await db.get_run(run_id)
+    if not run:
+        return
+    from app.core.pipeline import _set_node
+    await _set_node(run, "git_watcher", "running", f"Pushing drift commit for {flow}…")
+
+    try:
+        sha = await _push_change(flow, "inject")
+        if not sha:
+            await _set_node(run, "git_watcher", "failed", "Drift already applied or find string not found")
+            run.status = RunStatus.FAILED
+            await db.update_run(run)
+            return
+
+        run.trigger_commit = sha[:7]
+        await db.update_run(run)
+        await _set_node(run, "git_watcher", "running", f"Drift pushed (sha: {sha[:7]}) — waiting for GitHub Pages…")
+
+        await _wait_for_pages_deployment(sha, timeout=120)
+        await _set_node(run, "git_watcher", "success", f"Drift live on GitHub Pages (sha: {sha[:7]})")
+
+    except Exception as exc:
+        log.error("demo.inject_error", run_id=run_id, error=str(exc))
+        await _set_node(run, "git_watcher", "failed", f"Inject error: {exc}")
+        run.status = RunStatus.FAILED
+        await db.update_run(run)
+        return
+
+    await run_pipeline(run_id)
+
+    await _schedule_revert(flow)
+
+
+async def _schedule_revert(flow: str) -> None:
+    await asyncio.sleep(5)
+    try:
+        await _push_change(flow, "revert")
+        _active_drift["flow"] = None
+        log.info("demo.reverted", flow=flow)
+    except Exception as exc:
+        log.warning("demo.revert_error", flow=flow, error=str(exc))
+
+
+@router.post("/demo/reset")
+async def reset_demo():
+    flow = _active_drift.get("flow")
+    if not flow:
+        return {"status": "nothing_to_reset"}
+    try:
+        await _push_change(flow, "revert")
+        _active_drift["flow"] = None
+        return {"status": "reset", "flow": flow}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))

@@ -28,14 +28,22 @@ export async function submitApproval(
 }
 
 export async function triggerManualRun(
-  changedFiles: string[] = ["checkout.html"]
+  scenario: string = "flow1"
 ): Promise<{ run_id: string }> {
-  const params = new URLSearchParams();
-  changedFiles.forEach((f) => params.append("changed_files", f));
-  params.set("commit_sha", "manual");
+  const params = new URLSearchParams({ scenario, commit_sha: "manual" });
   const res = await fetch(`${API}/webhook/manual?${params}`, { method: "POST" });
   if (!res.ok) throw new Error("Trigger failed");
   return res.json();
+}
+
+export async function injectDrift(flow: string): Promise<{ run_id: string; description: string }> {
+  const res = await fetch(`${API}/demo/inject-drift?flow=${flow}`, { method: "POST" });
+  if (!res.ok) throw new Error("Drift injection failed");
+  return res.json();
+}
+
+export async function resetDemo(): Promise<void> {
+  await fetch(`${API}/demo/reset`, { method: "POST" });
 }
 
 export async function fetchGitLog(): Promise<GitCommit[]> {

@@ -1,5 +1,5 @@
 export type NodeState = "idle" | "running" | "success" | "failed" | "skipped" | "waiting";
-export type RunStatus = "planning" | "running" | "triaging" | "awaiting_human" | "healing" | "complete" | "failed";
+export type RunStatus = "planning" | "running" | "inspecting" | "triaging" | "awaiting_human" | "healing" | "complete" | "failed" | "quarantined";
 export type Classification = "drift" | "bug" | "env" | "none" | "";
 
 export interface NodeUpdate {
@@ -21,11 +21,20 @@ export interface QARun {
   trigger_commit: string;
   trigger_branch: string;
   suites_run: string[];
-  failures: Array<{ test: string; raw: string }>;
+  failures: Array<{ test: string; raw: string; selector?: string }>;
   triage_result: TriageResult | null;
   node_states: Record<string, NodeUpdate>;
   approved_by: string | null;
-  commit_sha: string | null;
+  pr_url: string | null;
+  langfuse_trace_id: string | null;
+  evidence: {
+    recent_commits?: Array<{ sha: string; message: string; changed_files: string[]; hours_ago: number }>;
+    dom_report?: { changed_selectors?: Array<{ old: string; found: string; confidence: number; match_reason: string }> };
+    test_history?: { consecutive_failures: number; last_5_results: string[] };
+  } | null;
+  cost_usd: number;
+  input_tokens: number;
+  output_tokens: number;
   created_at: string;
   updated_at: string;
 }

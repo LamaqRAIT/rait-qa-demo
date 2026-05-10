@@ -64,7 +64,7 @@ Rules:
 - If multiple unrelated tests fail simultaneously → likely ENV
 
 Reply with ONLY valid JSON, no markdown fences:
-{{"classification": "drift"|"bug"|"env", "confidence": 0.0-1.0, "evidence": "one sentence explaining the primary signal", "proposed_fix": null | {{"file": "tests/suite/test_checkout.py", "old": "old_selector_string", "new": "new_selector_string"}}}}
+{{"classification": "drift"|"bug"|"env", "confidence": 0.0-1.0, "evidence": "one sentence explaining the primary signal", "proposed_fix": null | {{"file": "backend/tests/suite/test_checkout.py", "old": "old_selector_string", "new": "new_selector_string"}}}}
 
 proposed_fix MUST be null for bug and env classifications.
 For drift, proposed_fix.file must be the test file containing the broken selector.

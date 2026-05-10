@@ -8,8 +8,15 @@ from app.core.state import RunRecord
 
 log = structlog.get_logger()
 
-TEST_FILE_PATH = "tests/suite/test_checkout.py"
-LOGIN_FILE_PATH = "tests/suite/test_login.py"
+TEST_FILE_PATH = "backend/tests/suite/test_checkout.py"
+LOGIN_FILE_PATH = "backend/tests/suite/test_login.py"
+
+
+def _repo_path(local_path: str) -> str:
+    """Convert a path relative to backend/ to a full repo path."""
+    if not local_path.startswith("backend/"):
+        return f"backend/{local_path.lstrip('/')}"
+    return local_path
 
 
 async def auto_fix(run: RunRecord) -> str | None:
@@ -19,7 +26,7 @@ async def auto_fix(run: RunRecord) -> str | None:
         log.warning("auto_fixer.no_fix", run_id=run.id)
         return None
 
-    file_path = proposed_fix.get("file", TEST_FILE_PATH)
+    file_path = _repo_path(proposed_fix.get("file", TEST_FILE_PATH))
     old_str = proposed_fix.get("old", "")
     new_str = proposed_fix.get("new", "")
 

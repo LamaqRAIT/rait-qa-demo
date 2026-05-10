@@ -89,39 +89,36 @@ async def _push_change(flow: str, direction: str) -> str:
 
 
 async def _wait_for_pages_deployment(expected_sha: str, timeout: int = 120) -> bool:
+    """
+    Wait for GitHub Pages CDN to serve the drift commit.
+    Strategy: poll the raw HTML for evidence of the patched content.
+    Falls back to a fixed 90-second wait if verification can't be done.
+    """
     settings = get_settings()
     import httpx
+
+    config = FLOW_CONFIGS.get(_active_drift.get("flow") or "", {})
+    expected_fragment = config.get("replace", "") if config else ""
+
+    file_path = config.get("file", "demo-site/checkout.html")
+    page_path = file_path.replace("demo-site/", "", 1)
+    probe_url = f"{settings.base_url.rstrip('/')}/{page_path}" if config else None
+
     deadline = asyncio.get_event_loop().time() + timeout
+    await asyncio.sleep(15)  # initial wait — Pages build takes at least 15s
+
     while asyncio.get_event_loop().time() < deadline:
-        try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.get(
-                    f"https://api.github.com/repos/{settings.github_repo_owner}"
-                    f"/{settings.github_repo_name}/deployments",
-                    headers={
-                        "Authorization": f"token {settings.github_token}",
-                        "Accept": "application/vnd.github+json",
-                    },
-                    params={"environment": "github-pages", "per_page": 1},
-                )
-                deployments = resp.json()
-                if deployments:
-                    dep_id = deployments[0]["id"]
-                    statuses_resp = await client.get(
-                        f"https://api.github.com/repos/{settings.github_repo_owner}"
-                        f"/{settings.github_repo_name}/deployments/{dep_id}/statuses",
-                        headers={
-                            "Authorization": f"token {settings.github_token}",
-                            "Accept": "application/vnd.github+json",
-                        },
-                    )
-                    statuses = statuses_resp.json()
-                    if statuses and statuses[0].get("state") == "success":
-                        log.info("demo.pages_deployed", sha=expected_sha)
+        if probe_url and expected_fragment:
+            try:
+                async with httpx.AsyncClient(timeout=10) as client:
+                    resp = await client.get(probe_url, follow_redirects=True)
+                    if expected_fragment in resp.text:
+                        log.info("demo.pages_deployed", sha=expected_sha[:7])
                         return True
-        except Exception as exc:
-            log.warning("demo.pages_poll_error", error=str(exc))
-        await asyncio.sleep(8)
+            except Exception as exc:
+                log.warning("demo.pages_poll_error", error=str(exc))
+        await asyncio.sleep(10)
+
     log.warning("demo.pages_timeout", timeout=timeout)
     return False
 
@@ -177,8 +174,8 @@ async def _inject_and_run(run_id: str, flow: str) -> None:
         await db.update_run(run)
         await _set_node(run, "git_watcher", "running", f"Drift pushed (sha: {sha[:7]}) — waiting for GitHub Pages…")
 
-        await _wait_for_pages_deployment(sha, timeout=120)
-        await _set_node(run, "git_watcher", "success", f"Drift live on GitHub Pages (sha: {sha[:7]})")
+        deployed = await _wait_for_pages_deployment(sha, timeout=120)
+        await _set_node(run, "git_watcher", "success", f"Drift live on GitHub Pages (sha: {sha[:7]}, deployed={deployed})")
 
     except Exception as exc:
         log.error("demo.inject_error", run_id=run_id, error=str(exc))

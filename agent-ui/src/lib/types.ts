@@ -26,6 +26,8 @@ export interface QARun {
   node_states: Record<string, NodeUpdate>;
   approved_by: string | null;
   pr_url: string | null;
+  commit_sha: string | null;
+  force_hitl: boolean;
   langfuse_trace_id: string | null;
   evidence: {
     recent_commits?: Array<{ sha: string; message: string; changed_files: string[]; hours_ago: number }>;

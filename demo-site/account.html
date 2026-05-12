@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Account — ShopRAIT</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <nav>
+    <a href="products.html" class="nav-brand"><span></span>ShopRAIT</a>
+    <a href="products.html">Products</a>
+    <a href="cart.html">Cart</a>
+    <a href="account.html" style="color:var(--text);">Account</a>
+    <a href="login.html" id="signout-link" style="margin-left:auto; color:var(--text-muted);">Sign out</a>
+  </nav>
+
+  <div class="container">
+    <div class="page-header">
+      <h1>Account Settings</h1>
+      <p>Manage your profile and preferences.</p>
+    </div>
+
+    <div style="display:grid; grid-template-columns:240px 1fr; gap:32px; align-items:start;">
+      <!-- Sidebar nav -->
+      <div class="card">
+        <nav style="display:flex; flex-direction:column; gap:4px; border:none; padding:0; height:auto;">
+          <a href="#profile" id="tab-profile" class="account-tab active"
+            style="padding:10px 12px; border-radius:6px; font-size:14px; font-weight:500; color:var(--text); text-decoration:none; background:var(--bg);">
+            Profile
+          </a>
+          <a href="#orders" id="tab-orders"
+            style="padding:10px 12px; border-radius:6px; font-size:14px; font-weight:500; color:var(--text-muted); text-decoration:none;">
+            Orders
+          </a>
+          <a href="#security" id="tab-security"
+            style="padding:10px 12px; border-radius:6px; font-size:14px; font-weight:500; color:var(--text-muted); text-decoration:none;">
+            Security
+          </a>
+        </nav>
+      </div>
+
+      <!-- Main content -->
+      <div>
+        <div class="card">
+          <h2 style="font-size:16px; font-weight:600; margin-bottom:20px;">Profile Information</h2>
+          <form id="profile-form" onsubmit="saveProfile(event)">
+            <div class="form-group">
+              <label for="profile-name">Full name</label>
+              <input type="text" id="profile-name" value="Demo User">
+            </div>
+            <div class="form-group">
+              <label for="profile-email">Email address</label>
+              <input type="email" id="profile-email" value="demo@rait.ai">
+            </div>
+            <div style="display:flex; gap:12px; align-items:center;">
+              <button type="submit" class="btn btn-primary" id="save-profile-btn">Save Changes</button>
+              <p id="profile-saved" style="display:none; font-size:13px; color:#35b888;">✓ Saved!</p>
+            </div>
+          </form>
+        </div>
+
+        <div class="card" style="margin-top:20px;">
+          <h2 style="font-size:16px; font-weight:600; margin-bottom:20px;">Change Password</h2>
+          <form id="password-form" onsubmit="changePassword(event)">
+            <div class="form-group">
+              <label for="current-password">Current password</label>
+              <input type="password" id="current-password" placeholder="Enter current password">
+            </div>
+            <div class="form-group">
+              <label for="new-password">New password</label>
+              <input type="password" id="new-password" placeholder="Min 8 characters">
+            </div>
+            <button type="submit" class="btn btn-secondary" id="change-password-btn">Update Password</button>
+            <p id="password-changed" style="display:none; font-size:13px; color:#35b888; margin-top:8px;">✓ Password updated!</p>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    <div class="container">ShopRAIT Demo · RAIT QA Agent Test Target</div>
+  </footer>
+
+  <script>
+    function saveProfile(e) {
+      e.preventDefault();
+      const ok = document.getElementById('profile-saved');
+      ok.style.display = 'inline';
+      setTimeout(() => ok.style.display = 'none', 2000);
+    }
+    function changePassword(e) {
+      e.preventDefault();
+      const ok = document.getElementById('password-changed');
+      ok.style.display = 'block';
+      setTimeout(() => ok.style.display = 'none', 2000);
+    }
+  </script>
+</body>
+</html>

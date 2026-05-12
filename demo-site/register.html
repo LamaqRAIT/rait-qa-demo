@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Create Account — ShopRAIT</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <nav>
+    <a href="products.html" class="nav-brand"><span></span>ShopRAIT</a>
+    <a href="login.html">Sign in</a>
+    <a href="register.html" style="color:var(--text);">Register</a>
+  </nav>
+
+  <div class="container">
+    <div style="max-width:440px; margin:80px auto;">
+      <div class="page-header" style="padding:0 0 28px; text-align:center;">
+        <h1>Create your account</h1>
+        <p>Join ShopRAIT to track orders and save preferences.</p>
+      </div>
+      <div class="card">
+        <form id="register-form" onsubmit="handleRegister(event)">
+          <div class="form-group">
+            <label for="full-name">Full name</label>
+            <input type="text" id="full-name" placeholder="Demo User" required>
+          </div>
+          <div class="form-group">
+            <label for="reg-email">Email address</label>
+            <input type="email" id="reg-email" placeholder="you@example.com" required>
+          </div>
+          <div class="form-group">
+            <label for="reg-password">Password</label>
+            <input type="password" id="reg-password" placeholder="Min 8 characters" required minlength="8">
+          </div>
+          <div class="form-group">
+            <label for="confirm-password">Confirm password</label>
+            <input type="password" id="confirm-password" placeholder="Repeat password" required>
+          </div>
+          <button type="submit" class="btn btn-primary" id="reg-btn"
+            style="width:100%; height:44px; font-size:15px; margin-top:8px;">
+            Create Account
+          </button>
+          <p id="reg-error" style="display:none; color:var(--red); font-size:13px; margin-top:10px;"></p>
+          <p id="reg-success" style="display:none; color:#35b888; font-size:13px; margin-top:10px;"></p>
+        </form>
+      </div>
+      <p style="text-align:center; font-size:13px; color:var(--text-muted); margin-top:16px;">
+        Already have an account? <a href="login.html" style="color:var(--blue);">Sign in →</a>
+      </p>
+    </div>
+  </div>
+
+  <footer>
+    <div class="container">ShopRAIT Demo · RAIT QA Agent Test Target</div>
+  </footer>
+
+  <script>
+    function handleRegister(e) {
+      e.preventDefault();
+      const pw = document.getElementById('reg-password').value;
+      const cpw = document.getElementById('confirm-password').value;
+      const err = document.getElementById('reg-error');
+      const ok = document.getElementById('reg-success');
+      if (pw !== cpw) {
+        err.textContent = 'Passwords do not match.';
+        err.style.display = 'block';
+        ok.style.display = 'none';
+        return;
+      }
+      err.style.display = 'none';
+      ok.textContent = '✓ Account created! Redirecting to login…';
+      ok.style.display = 'block';
+      setTimeout(() => window.location.href = 'login.html', 1500);
+    }
+  </script>
+</body>
+</html>

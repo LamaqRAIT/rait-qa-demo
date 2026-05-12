@@ -11,8 +11,10 @@
 <body>
   <nav>
     <a href="products.html" class="nav-brand"><span></span>ShopRAIT</a>
-    <a href="products.html">Products</a>
-    <a href="checkout.html">Checkout</a>
+    <a href="products.html" style="color:var(--text);">Products</a>
+    <a href="search.html">Search</a>
+    <a href="cart.html">Cart (0)</a>
+    <a href="account.html">Account</a>
     <a href="login.html" style="margin-left:auto; color: var(--text-muted);">Sign out</a>
   </nav>
 
@@ -20,6 +22,13 @@
     <div class="page-header">
       <h1>Products</h1>
       <p>Explore our collection of tech essentials.</p>
+    </div>
+
+    <div style="max-width:480px; margin-bottom:28px;">
+      <div style="display:flex; gap:8px;">
+        <input type="text" id="product-search" placeholder="Search products…" oninput="filterProducts(this.value)" style="flex:1;">
+        <a href="search.html" class="btn btn-secondary" style="height:40px; display:inline-flex; align-items:center;">Advanced →</a>
+      </div>
     </div>
 
     <div class="product-grid">
@@ -120,6 +129,12 @@
       toast.textContent = `✓ ${btn.closest('.product-card').querySelector('.product-name').textContent} added`;
       toast.style.display = 'block';
       setTimeout(() => { toast.style.display = 'none'; }, 2000);
+    }
+    function filterProducts(q) {
+      document.querySelectorAll('.product-card').forEach(card => {
+        const name = card.querySelector('.product-name').textContent.toLowerCase();
+        card.style.display = q && !name.includes(q.toLowerCase()) ? 'none' : '';
+      });
     }
   </script>
 </body>

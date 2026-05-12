@@ -172,7 +172,45 @@ async def init_db() -> None:
     async with _engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
+    await _migrate_schema()
     await _seed_initial_data()
+
+
+async def _migrate_schema() -> None:
+    """Add missing columns to existing tables (safe for repeated runs via IF NOT EXISTS)."""
+    settings = get_settings()
+    if not settings.is_postgres():
+        return  # SQLite: create_all handles everything
+
+    migrations = [
+        # qa_runs — new columns added in v2
+        "ALTER TABLE qa_runs ADD COLUMN IF NOT EXISTS classification     VARCHAR",
+        "ALTER TABLE qa_runs ADD COLUMN IF NOT EXISTS confidence         FLOAT",
+        "ALTER TABLE qa_runs ADD COLUMN IF NOT EXISTS cost_usd           FLOAT DEFAULT 0",
+        "ALTER TABLE qa_runs ADD COLUMN IF NOT EXISTS input_tokens       INTEGER DEFAULT 0",
+        "ALTER TABLE qa_runs ADD COLUMN IF NOT EXISTS output_tokens      INTEGER DEFAULT 0",
+        "ALTER TABLE qa_runs ADD COLUMN IF NOT EXISTS consecutive_failures INTEGER DEFAULT 0",
+        "ALTER TABLE qa_runs ADD COLUMN IF NOT EXISTS trigger_branch     VARCHAR DEFAULT 'main'",
+        "ALTER TABLE qa_runs ADD COLUMN IF NOT EXISTS human_override     BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE qa_runs ADD COLUMN IF NOT EXISTS team_id            VARCHAR DEFAULT 'core-platform'",
+        "ALTER TABLE qa_runs ADD COLUMN IF NOT EXISTS suite_selection_method VARCHAR DEFAULT 'fallback_all'",
+        "ALTER TABLE qa_runs ADD COLUMN IF NOT EXISTS report_text        TEXT",
+        "ALTER TABLE qa_runs ADD COLUMN IF NOT EXISTS langfuse_trace_url TEXT",
+        "ALTER TABLE qa_runs ADD COLUMN IF NOT EXISTS data_json          TEXT DEFAULT '{}'",
+        "ALTER TABLE qa_runs ADD COLUMN IF NOT EXISTS updated_at         TIMESTAMP",
+        # Rename old columns if they exist from v1 (no-op if already migrated)
+        # (old 'data' JSON → data_json TEXT handled by create_all on new installs)
+    ]
+
+    async with _engine.begin() as conn:
+        for sql in migrations:
+            try:
+                await conn.execute(text(sql))
+            except Exception as exc:
+                # Log but don't abort — column may already exist under old name
+                log.warning("db.migrate.skip", sql=sql[:60], error=str(exc)[:80])
+
+    log.info("db.migrate.done")
 
 
 # ── Seed data ─────────────────────────────────────────────────────────────────

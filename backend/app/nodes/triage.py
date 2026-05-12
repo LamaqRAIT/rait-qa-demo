@@ -1,44 +1,15 @@
 """
-Triage node — Gemini direct SDK + Langfuse observability.
-No LangChain. Classifies failures from evidence bundle.
+Triage node — unified LLM client (Claude Sonnet 4.6 → Groq → Gemini) + Langfuse.
+Classifies test failures from a structured evidence bundle.
 """
-import asyncio
 import json
-import re
 import structlog
-import google.generativeai as genai
-from app.config import get_settings
 from app.core.state import TriageResult
-
-
-async def _call_groq(prompt: str, api_key: str) -> tuple[str, int, int]:
-    """Call Groq API. Returns (text, input_tokens, output_tokens)."""
-    from groq import AsyncGroq
-    client = AsyncGroq(api_key=api_key)
-    resp = await client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.1,
-        max_tokens=512,
-    )
-    text = resp.choices[0].message.content or ""
-    usage = resp.usage
-    return text, (usage.prompt_tokens if usage else 0), (usage.completion_tokens if usage else 0)
-
-
-async def _call_gemini(prompt: str, model_name: str) -> tuple[str, int, int]:
-    """Call Gemini API. Returns (text, input_tokens, output_tokens)."""
-    model = genai.GenerativeModel(model_name)
-    response = await model.generate_content_async(prompt)
-    raw = response.text
-    usage = getattr(response, "usage_metadata", None)
-    input_tok = getattr(usage, "prompt_token_count", 0) if usage else 0
-    output_tok = getattr(usage, "candidates_token_count", 0) if usage else 0
-    return raw, input_tok, output_tok
+from app.llm.client import call_llm, strip_json_fences
 
 log = structlog.get_logger()
 
-TRIAGE_PROMPT = """You are a QA triage agent. Classify the following test failures based on all available evidence.
+TRIAGE_PROMPT = """You are a QA triage agent for an e-commerce platform. Classify the following test failures using all available evidence.
 
 FAILURES:
 {failures}
@@ -46,47 +17,38 @@ FAILURES:
 DOM INSPECTION REPORT:
 {dom_report}
 
-RECENT COMMITS:
+RECENT COMMITS (last 5):
 {recent_commits}
 
 TEST HISTORY:
 {test_history}
 
+SUITE SELECTION METHOD: {suite_selection_method}
+
 Classify as exactly one of:
-- drift: The UI changed legitimately (CSS class renamed, text copy changed, layout updated) — the test selector is outdated, NOT a bug in the application
-- bug: Application logic broke — the test is correct, the application behavior is wrong
+- drift: The UI changed legitimately (CSS class renamed, text copy changed, layout updated) — the test selector is outdated, NOT a bug
+- bug: Application logic broke — the test is correct but the application behavior is wrong (wrong redirect, wrong calculation, missing feature)
 - env: Infrastructure problem — network failure, timeout, missing service, canary check failed
 
-Rules:
-- If a commit message mentions renaming a CSS class that matches the failing selector → high confidence DRIFT
-- If a commit message mentions changing text copy that matches the failing has-text selector → high confidence DRIFT
-- If DOM inspection found a candidate selector with confidence > 0.80 → strong evidence of DRIFT
-- If the selector still exists on the page (found_on_page=True) → cannot be DRIFT, likely BUG or ENV
-- If the failure is a URL/redirect assertion (wait_for_url, to_have_url) and the redirect destination changed in a commit → BUG (application behavior broke)
-- If multiple unrelated tests fail simultaneously → likely ENV
-- proposed_fix must be null for bug and env classifications
+Classification rules (apply in order):
+1. If canary failed → env (confidence 0.95)
+2. If a recent commit renames a CSS class/attribute that matches the failing selector → drift (confidence 0.90–0.97)
+3. If a recent commit changes text copy matching a failing :has-text selector → drift (confidence 0.90–0.95)
+4. If DOM inspection found a replacement candidate with confidence > 0.80 → drift (confidence 0.85+)
+5. If the selector still exists on the page (found_on_page=True) → NOT drift, likely bug or env
+6. If a URL/redirect assertion fails and a commit changed the redirect destination → bug (confidence 0.90+)
+7. If multiple unrelated tests from different suites fail simultaneously → env (confidence 0.85)
+8. If failure is TimeoutError with no commit touching the affected file → env (confidence 0.70)
+9. If failure is an assertion error (wrong value, wrong count, wrong state) with no matching commit → bug (confidence 0.75)
 
 Reply with ONLY valid JSON, no markdown fences:
-{{"classification": "drift"|"bug"|"env", "confidence": 0.0-1.0, "evidence": "one sentence explaining the primary signal", "proposed_fix": null | {{"file": "backend/tests/suite/test_checkout.py", "old": "old_selector_string", "new": "new_selector_string"}}}}
+{{"classification": "drift"|"bug"|"env", "confidence": 0.0-1.0, "evidence": "one sentence citing the strongest signal", "proposed_fix": null | {{"file": "backend/tests/suite/test_checkout.py", "old": "exact_old_string_in_file", "new": "new_string_to_replace_with"}}}}
 
-proposed_fix MUST be null for bug and env classifications.
-For drift, proposed_fix.file must be the test file containing the broken selector.
-proposed_fix.old and proposed_fix.new must be exact strings that appear in the test file."""
-
-
-def _init_langfuse():
-    settings = get_settings()
-    if not settings.langfuse_public_key:
-        return None
-    try:
-        from langfuse import Langfuse
-        return Langfuse(
-            public_key=settings.langfuse_public_key,
-            secret_key=settings.langfuse_secret_key,
-            host=settings.langfuse_host,
-        )
-    except Exception:
-        return None
+Rules for proposed_fix:
+- MUST be null for bug and env.
+- For drift: file must be the test file path, old/new must be exact strings appearing in that file.
+- proposed_fix.old is typically the old CSS selector or text string used in the test.
+- proposed_fix.new must be the new selector confirmed by DOM inspection (highest-confidence candidate)."""
 
 
 async def triage(
@@ -94,98 +56,202 @@ async def triage(
     failures: list[dict],
     dom_report: dict,
     evidence: dict,
+    suite_selection_method: str = "fallback_all",
 ) -> tuple[TriageResult, str | None, int, int, float]:
-    """Returns (TriageResult, langfuse_trace_id, input_tokens, output_tokens, cost_usd)."""
-    settings = get_settings()
-    if settings.google_api_key:
-        genai.configure(api_key=settings.google_api_key)
-
+    """
+    Returns (TriageResult, langfuse_trace_url, input_tokens, output_tokens, cost_usd).
+    Note: we now return trace_url (full URL) instead of trace_id for direct UI linking.
+    """
     prompt = TRIAGE_PROMPT.format(
         failures=json.dumps(failures, indent=2),
         dom_report=json.dumps(dom_report, indent=2),
         recent_commits=json.dumps(evidence.get("recent_commits", []), indent=2),
         test_history=json.dumps(evidence.get("test_history", {}), indent=2),
+        suite_selection_method=suite_selection_method,
     )
 
-    lf = _init_langfuse()
-    trace = None
-    if lf:
-        trace = lf.trace(name="triage", metadata={"run_id": run_id})
-
-    raw = ""
-    used_model = "groq/llama-3.3-70b-versatile"
-    input_tokens = output_tokens = 0
-
     try:
-        # 1st choice: Groq (generous free tier, fast)
-        if settings.groq_api_key:
-            raw, input_tokens, output_tokens = await _call_groq(prompt, settings.groq_api_key)
-            used_model = "groq/llama-3.3-70b-versatile"
-            log.info("triage.groq_ok", run_id=run_id, tokens=input_tokens + output_tokens)
-        elif settings.google_api_key:
-            # Gemini fallback — try models with 1 retry on 429
-            for model_name in ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]:
-                try:
-                    for attempt in range(2):
-                        try:
-                            raw, input_tokens, output_tokens = await _call_gemini(prompt, model_name)
-                            used_model = model_name
-                            break
-                        except Exception as e:
-                            if "429" in str(e) and attempt == 0:
-                                await asyncio.sleep(15)
-                            else:
-                                raise
-                    break
-                except Exception as e:
-                    log.warning("triage.gemini_model_failed", model=model_name, error=str(e)[:80])
-                    continue
-        else:
-            raise RuntimeError("No LLM API key configured (GROQ_API_KEY or GOOGLE_API_KEY)")
+        raw, in_tok, out_tok, cost, model_used, trace_url = await call_llm(
+            prompt=prompt,
+            run_id=run_id,
+            call_name="triage",
+            model_preference="sonnet",
+            max_tokens=512,
+        )
 
-        raw = raw.strip()
-        raw = re.sub(r"^```json?\s*", "", raw)
-        raw = re.sub(r"\s*```$", "", raw)
-        result = json.loads(raw)
+        if not raw:
+            # LLM unavailable — use deterministic evidence-based fallback
+            log.warning("triage.llm_unavailable", run_id=run_id)
+            return _deterministic_triage(failures, dom_report, evidence)
 
+        result = json.loads(strip_json_fences(raw))
         classification = result.get("classification", "env")
         confidence = float(result.get("confidence", 0.5))
         evidence_text = result.get("evidence", "")
         proposed_fix = result.get("proposed_fix")
-        cost_usd = (input_tokens * 0.000000059) + (output_tokens * 0.000000079)
 
-        if trace:
-            trace.generation(
-                name="triage_call",
-                model=used_model,
-                input=prompt[:2000],
-                output=raw[:1000],
-                usage={"input": input_tokens, "output": output_tokens},
-                metadata={"run_id": run_id, "classification": classification, "confidence": confidence},
-            )
-            lf.flush()
+        # Enforce invariant: proposed_fix must be null for non-drift
+        if classification != "drift":
+            proposed_fix = None
 
         log.info(
             "triage.done",
             run_id=run_id,
-            model=used_model,
+            model=model_used,
             classification=classification,
             confidence=confidence,
-            tokens_in=input_tokens,
-            tokens_out=output_tokens,
+            tokens_in=in_tok,
+            tokens_out=out_tok,
+            cost=cost,
         )
 
-        trace_id = trace.id if trace else None
         return (
             TriageResult(classification=classification, confidence=confidence, evidence=evidence_text, proposed_fix=proposed_fix),
-            trace_id, input_tokens, output_tokens, cost_usd,
+            trace_url, in_tok, out_tok, cost,
         )
 
     except Exception as exc:
         log.error("triage.error", run_id=run_id, error=str(exc)[:200])
-        if trace:
-            lf.flush()
+        return _deterministic_triage(failures, dom_report, evidence)
+
+
+def _infer_test_file(test_name: str) -> str:
+    """Map a test name / class name to its test file path."""
+    t = test_name.lower()
+    if "login" in t:    return "backend/tests/suite/test_login.py"
+    if "cart" in t:     return "backend/tests/suite/test_cart.py"
+    if "search" in t:   return "backend/tests/suite/test_search.py"
+    if "registr" in t:  return "backend/tests/suite/test_registration.py"
+    if "account" in t:  return "backend/tests/suite/test_account.py"
+    if "product" in t:  return "backend/tests/suite/test_products.py"
+    if "nav" in t:      return "backend/tests/suite/test_navigation.py"
+    return "backend/tests/suite/test_checkout.py"
+
+
+def _deterministic_triage(
+    failures: list[dict],
+    dom_report: dict,
+    evidence: dict,
+) -> tuple[TriageResult, None, int, int, float]:
+    """
+    Rule-based fallback when LLM is unavailable.
+    Uses DOM candidates + commit messages + error types to classify.
+    Marked with '(deterministic)' in the evidence so it's auditable.
+    """
+    candidates = dom_report.get("changed_selectors", [])
+    recent_commits = evidence.get("recent_commits", [])
+
+    # Check for selector candidates from DOM inspection
+    best_candidate = None
+    best_conf = 0.0
+    for c in candidates:
+        if c.get("confidence", 0) > best_conf:
+            best_conf = c["confidence"]
+            best_candidate = c
+
+    # Check commit messages for rename signals (use word-boundary-aware keyword matching to avoid false positives)
+    import re as _re
+    _RENAME_KEYWORDS = _re.compile(
+        r'\b(?:rename|refactor|class|selector|copy|text|btn|css|label|aria)\b',
+        _re.IGNORECASE,
+    )
+    commit_signals = []
+    for commit in recent_commits:
+        msg = commit.get("message", "").lower()
+        if _RENAME_KEYWORDS.search(msg):
+            commit_signals.append(msg)
+
+    # Check for URL/redirect assertion failures (bug signal)
+    url_failures = [f for f in failures if
+        "url" in (f.get("raw", "") + f.get("selector", "")).lower()
+        or "redirect" in f.get("raw", "").lower()
+        or "wait_for_url" in f.get("raw", "").lower()
+        or ("login" in f.get("test", "").lower() and "credential" in f.get("test", "").lower())
+        or "to_have_url" in f.get("raw", "").lower()
+    ]
+
+    # Classification logic
+    if best_conf >= 0.70 or commit_signals:
+        # Strong DOM candidate or commit rename signal → drift
+        confidence = min(0.88, max(best_conf, 0.72)) if best_conf > 0 else 0.72
+        evidence_str = (
+            f"Deterministic: DOM candidate '{best_candidate['found']}' (conf {best_conf:.2f}) + "
+            f"commit signal: {commit_signals[0][:60] if commit_signals else 'n/a'}"
+        ) if best_candidate else f"Deterministic: commit rename signal detected — {commit_signals[0][:80] if commit_signals else 'n/a'}"
+
+        proposed_fix = None
+
+        # Try to build proposed_fix from DOM candidate
+        if best_candidate and failures:
+            for f in failures:
+                if f.get("selector"):
+                    # Infer which test file the failure came from
+                    test_name = f.get("test", "")
+                    test_file = "backend/tests/suite/test_checkout.py"
+                    if "login" in test_name.lower():
+                        test_file = "backend/tests/suite/test_login.py"
+                    elif "cart" in test_name.lower():
+                        test_file = "backend/tests/suite/test_cart.py"
+                    elif "search" in test_name.lower():
+                        test_file = "backend/tests/suite/test_search.py"
+                    elif "registr" in test_name.lower():
+                        test_file = "backend/tests/suite/test_registration.py"
+                    elif "nav" in test_name.lower():
+                        test_file = "backend/tests/suite/test_navigation.py"
+                    proposed_fix = {
+                        "file": test_file,
+                        "old": f["selector"],
+                        "new": best_candidate["found"],
+                    }
+                    break
+
+        # Fallback: infer from commit message when no DOM candidate
+        if not proposed_fix and commit_signals and failures:
+            import re as _re2
+            # Try "rename X to Y" pattern in commit messages
+            for msg in commit_signals:
+                m = _re2.search(r'rename\s+([^\s]+)\s+to\s+([^\s\[\]]+)', msg, _re2.IGNORECASE)
+                if m:
+                    old_name, new_name = m.group(1), m.group(2)
+                    for f in failures:
+                        if f.get("selector"):
+                            selector = f["selector"]
+                            test_name = f.get("test", "")
+                            test_file = _infer_test_file(test_name)
+                            # Map the commit rename to selector strings used in tests
+                            if old_name in selector or old_name.replace("-", "_") in selector:
+                                proposed_fix = {
+                                    "file": test_file,
+                                    "old": selector,
+                                    "new": selector.replace(old_name, new_name),
+                                }
+                                break
+                    if proposed_fix:
+                        break
+
         return (
-            TriageResult(classification="env", confidence=0.5, evidence=f"Triage failed: {exc}", proposed_fix=None),
+            TriageResult(classification="drift", confidence=confidence, evidence=evidence_str + " (deterministic)", proposed_fix=proposed_fix),
+            None, 0, 0, 0.0,
+        )
+
+    elif url_failures:
+        return (
+            TriageResult(
+                classification="bug",
+                confidence=0.75,
+                evidence="Deterministic: URL/redirect assertion failure with no matching DOM candidate (deterministic)",
+                proposed_fix=None,
+            ),
+            None, 0, 0, 0.0,
+        )
+
+    else:
+        return (
+            TriageResult(
+                classification="env",
+                confidence=0.60,
+                evidence="Deterministic: no DOM candidates, no commit signals, no URL assertion — infrastructure suspected (deterministic)",
+                proposed_fix=None,
+            ),
             None, 0, 0, 0.0,
         )

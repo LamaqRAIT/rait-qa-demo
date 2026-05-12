@@ -142,6 +142,41 @@ export function RunReportDrawer({
             </>
           )}
 
+          {/* Reporter summary */}
+          {run.report_text && (
+            <Field label="Run Summary">
+              <p className="text-cream/65 leading-relaxed text-[12px] bg-bash p-3 rounded-lg border border-cream/8 italic">
+                {run.report_text}
+              </p>
+            </Field>
+          )}
+
+          {/* Cost breakdown */}
+          {run.cost_usd > 0 && (
+            <Field label="LLM Cost">
+              <div className="flex items-center gap-3 text-[12px]">
+                <span className="text-green font-mono">${run.cost_usd.toFixed(5)}</span>
+                <span className="text-cream/30">·</span>
+                <span className="text-cream/40">{run.input_tokens.toLocaleString()} in</span>
+                <span className="text-cream/30">+</span>
+                <span className="text-cream/40">{run.output_tokens.toLocaleString()} out tokens</span>
+              </div>
+            </Field>
+          )}
+
+          {/* Suite selection */}
+          {run.suite_selection_method && (
+            <Field label="Suite Selection">
+              <span className={clsx(
+                "text-[11px] font-mono font-semibold",
+                run.suite_selection_method === "deterministic" ? "text-green" :
+                run.suite_selection_method === "llm_fallback"  ? "text-yellow" : "text-cream/40"
+              )}>
+                {run.suite_selection_method}
+              </span>
+            </Field>
+          )}
+
           {/* Resolution */}
           {run.approved_by && (
             <Field label="Approved by">
@@ -152,6 +187,16 @@ export function RunReportDrawer({
           {run.commit_sha && (
             <Field label="Heal commit">
               <span className="font-mono text-blue">{run.commit_sha}</span>
+            </Field>
+          )}
+
+          {/* Langfuse trace */}
+          {run.langfuse_trace_url && (
+            <Field label="LLM Trace">
+              <a href={run.langfuse_trace_url} target="_blank" rel="noreferrer"
+                className="text-[12px] text-blue/70 hover:text-blue underline">
+                Open in Langfuse →
+              </a>
             </Field>
           )}
         </div>

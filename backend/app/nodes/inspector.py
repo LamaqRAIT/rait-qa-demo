@@ -5,6 +5,7 @@ Avoids event loop conflicts with FastAPI by using asyncio subprocess.
 import asyncio
 import json
 import os
+import sys
 import structlog
 from app.config import get_settings
 
@@ -35,9 +36,22 @@ async def inspect_dom(run_id: str, failures: list[dict]) -> dict:
             "note": "No DOM selectors in failures — possible URL/redirect or logic assertion failure",
         }
 
-    first_test = (failures[0].get("test") or "")
-    if "login" in first_test:
-        url = settings.base_url.rstrip("/") + "/login.html"
+    # Auto-detect the page from the test name
+    first_test = (failures[0].get("test") or "").lower()
+    page_map = {
+        "login":        "/login.html",
+        "register":     "/register.html",
+        "search":       "/search.html",
+        "cart":         "/cart.html",
+        "account":      "/account.html",
+        "navigation":   "/products.html",
+        "products":     "/products.html",
+        "checkout":     "/checkout.html",
+    }
+    for key, path in page_map.items():
+        if key in first_test:
+            url = settings.base_url.rstrip("/") + path
+            break
 
     payload = json.dumps({
         "url": url,
@@ -46,7 +60,7 @@ async def inspect_dom(run_id: str, failures: list[dict]) -> dict:
     })
 
     proc = await asyncio.create_subprocess_exec(
-        "python", "-m", "app.nodes.inspector_worker",
+        sys.executable, "-m", "app.nodes.inspector_worker",
         payload,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,

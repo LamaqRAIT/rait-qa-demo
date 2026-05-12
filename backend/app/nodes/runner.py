@@ -4,6 +4,7 @@ Runs tests/suite/ against BASE_URL, parses JUnit XML for failures.
 """
 import asyncio
 import os
+import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 import structlog
@@ -14,17 +15,23 @@ log = structlog.get_logger()
 RESULTS_PATH = "/tmp/qa_results.xml"
 
 
-async def run_tests(run_id: str) -> list[dict]:
+async def run_tests(run_id: str, selected_suites: list[str] | None = None) -> list[dict]:
     settings = get_settings()
     base_url = settings.base_url.rstrip("/")
 
     if Path(RESULTS_PATH).exists():
         Path(RESULTS_PATH).unlink()
 
+    # Build the test paths: specific suite files or the whole suite dir
+    if selected_suites:
+        test_paths = [f"tests/suite/{s}" for s in selected_suites if s.endswith(".py")]
+    else:
+        test_paths = ["tests/suite/"]
+
     env = {**os.environ, "BASE_URL": base_url}
     proc = await asyncio.create_subprocess_exec(
-        "python", "-m", "pytest",
-        "tests/suite/",
+        sys.executable, "-m", "pytest",
+        *test_paths,
         f"--junit-xml={RESULTS_PATH}",
         "-v", "--tb=short",
         "--timeout=30",
@@ -36,7 +43,7 @@ async def run_tests(run_id: str) -> list[dict]:
     try:
         stdout, stderr = await asyncio.wait_for(
             proc.communicate(),
-            timeout=120,
+            timeout=200,
         )
     except asyncio.TimeoutError:
         proc.kill()
@@ -64,7 +71,10 @@ def _parse_junit(results_path: str, raw_output: str) -> list[dict]:
             node = failure if failure is not None else error
             if node is not None:
                 name = f"{testcase.get('classname', '')}.{testcase.get('name', '')}"
-                msg = node.get("message", "") or node.text or ""
+                # Combine message attribute AND full text body for richer signal
+                msg_attr = node.get("message", "") or ""
+                msg_text = (node.text or "")
+                msg = (msg_attr + " " + msg_text).strip()
                 selector = _extract_selector(msg)
                 failures.append({
                     "test": name,

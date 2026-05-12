@@ -1,70 +1,66 @@
 """
-Reporter node — formats the final run summary using Gemini.
-Updates run status in DB to complete or failed.
+Reporter node — uses Claude Haiku (cheapest) to format run summary.
+Persists the report text to run.report_text for UI display.
 """
-import asyncio
-import json
 import structlog
-import google.generativeai as genai
-from app.config import get_settings
-from app.core.state import RunRecord, RunStatus
+import app.db as db
+from app.core.state import RunRecord
+from app.llm.client import call_llm
 
 log = structlog.get_logger()
 
-REPORT_PROMPT = """Write a concise one-paragraph QA run summary (3-4 sentences max).
+REPORT_PROMPT = """Write a concise one-paragraph QA run summary (3–4 sentences max). Be specific.
 
 Classification: {classification}
-Confidence: {confidence}
+Confidence: {confidence:.0%}
 Evidence: {evidence}
-Failures: {failure_count}
+Failures: {failure_count} test(s)
+Test suites: {suites}
 PR opened: {pr_url}
 Auto-fixed: {auto_fixed}
+Cost: ${cost:.4f}
 
-Be specific about what failed, why, and what action was taken."""
+Include: what failed, the root cause, what action was taken, and whether it needs human follow-up.
+Do NOT include headers, bullet points, or formatting — plain prose only."""
 
 
 async def generate_report(run: RunRecord) -> str:
-    settings = get_settings()
-    if not settings.groq_api_key and not settings.google_api_key:
-        return _fallback_report(run)
     prompt = REPORT_PROMPT.format(
-        classification=run.triage.classification,
+        classification=run.triage.classification or "unknown",
         confidence=run.triage.confidence,
-        evidence=run.triage.evidence,
+        evidence=run.triage.evidence or "n/a",
         failure_count=len(run.failures),
+        suites=", ".join(run.suites_run) or "all suites",
         pr_url=run.pr_url or "none",
         auto_fixed=bool(run.pr_url),
+        cost=run.cost_usd,
     )
+
     try:
-        if settings.groq_api_key:
-            from groq import AsyncGroq
-            client = AsyncGroq(api_key=settings.groq_api_key)
-            resp = await client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.3,
-                max_tokens=256,
-            )
-            return resp.choices[0].message.content.strip()
-        elif settings.google_api_key:
-            genai.configure(api_key=settings.google_api_key)
-            for model_name in ["gemini-2.0-flash", "gemini-1.5-flash"]:
-                try:
-                    m = genai.GenerativeModel(model_name)
-                    resp = await m.generate_content_async(prompt)
-                    return resp.text.strip()
-                except Exception:
-                    continue
+        raw, _, _, _, _, _ = await call_llm(
+            prompt=prompt,
+            run_id=run.id,
+            call_name="reporter",
+            model_preference="haiku",
+            max_tokens=256,
+        )
+        report = raw.strip() if raw else _fallback_report(run)
     except Exception as exc:
-        log.warning("reporter.llm_error", run_id=run.id, error=str(exc)[:120])
-    return _fallback_report(run)
+        log.warning("reporter.llm_error", run_id=run.id, error=str(exc)[:100])
+        report = _fallback_report(run)
+
+    run.report_text = report
+    await db.update_run(run)
+    return report
 
 
 def _fallback_report(run: RunRecord) -> str:
     cls = run.triage.classification or "unknown"
-    fix_note = f" PR opened: {run.pr_url}" if run.pr_url else ""
+    fix_note = f" PR opened: {run.pr_url}." if run.pr_url else ""
+    status = "awaiting human review" if run.status.value == "awaiting_human" else "complete"
     return (
-        f"Run {run.id[:8]} — {len(run.failures)} failure(s) classified as {cls} "
-        f"(confidence {run.triage.confidence:.2f}). "
-        f"Evidence: {run.triage.evidence or 'n/a'}.{fix_note}"
+        f"Run {run.id[:8]}: {len(run.failures)} failure(s) in {', '.join(run.suites_run) or 'the test suite'} "
+        f"classified as {cls.upper()} with {run.triage.confidence:.0%} confidence. "
+        f"Evidence: {run.triage.evidence or 'n/a'}.{fix_note} "
+        f"Pipeline status: {status}."
     )

@@ -3,6 +3,7 @@ Canary node — two always-passing infra checks that gate the entire suite.
 If either fails, the run is immediately classified 'env' and no tests execute.
 """
 import asyncio
+import sys
 import structlog
 from app.config import get_settings
 
@@ -14,7 +15,7 @@ async def run_canary(run_id: str) -> dict:
     base_url = settings.base_url.rstrip("/")
 
     proc = await asyncio.create_subprocess_exec(
-        "python", "-m", "pytest",
+        sys.executable, "-m", "pytest",
         "tests/canary/",
         "-v", "--tb=short",
         "--timeout=30",

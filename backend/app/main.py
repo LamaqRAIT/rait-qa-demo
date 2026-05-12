@@ -20,6 +20,7 @@ from app.api.runs import router as runs_router
 from app.api.approve import router as approve_router
 from app.api.metrics import router as metrics_router
 from app.api.demo import router as demo_router
+from app.api.auth import router as auth_router
 
 log = structlog.get_logger()
 settings = get_settings()
@@ -29,7 +30,29 @@ settings = get_settings()
 async def lifespan(app: FastAPI):
     await db.init_db()
     log.info("db.ready")
+
+    # Build selector index from test files
+    try:
+        from app.core.selector_index import build_selector_index
+        await build_selector_index()
+    except Exception as exc:
+        log.warning("selector_index.error", error=str(exc)[:100])
+
+    # Start APScheduler
+    try:
+        from app.scheduler import start_scheduler
+        start_scheduler()
+    except Exception as exc:
+        log.warning("scheduler.start_error", error=str(exc)[:100])
+
     yield
+
+    # Shutdown scheduler
+    try:
+        from app.scheduler import stop_scheduler
+        stop_scheduler()
+    except Exception:
+        pass
     log.info("shutdown")
 
 
@@ -37,12 +60,13 @@ app = FastAPI(title="RAIT QA Agent", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.get_cors_origins(),
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS", "PUT", "DELETE"],
     allow_headers=["*"],
 )
 
+app.include_router(auth_router)
 app.include_router(runs_router)
 app.include_router(approve_router)
 app.include_router(metrics_router)
@@ -180,3 +204,21 @@ def _time_ago(dt: datetime) -> str:
     if diff.days < 1:
         return f"{diff.seconds // 3600}h ago"
     return f"{diff.days}d ago"
+
+
+# ── Scheduler trigger (demo convenience) ─────────────────────────────────────
+
+@app.post("/scheduler/trigger-nightly")
+async def trigger_nightly(background_tasks: BackgroundTasks):
+    """Manually trigger the nightly suite run (for demo purposes)."""
+    from app.scheduler import _run_nightly_suite
+    background_tasks.add_task(_run_nightly_suite)
+    return {"status": "triggered", "job": "nightly_run"}
+
+
+@app.post("/scheduler/rebuild-index")
+async def trigger_index_rebuild():
+    """Manually trigger selector index rebuild."""
+    from app.core.selector_index import build_selector_index
+    count = await build_selector_index()
+    return {"status": "done", "entries": count}

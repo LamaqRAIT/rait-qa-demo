@@ -40,6 +40,7 @@ class RunRecord:
     status: RunStatus = RunStatus.PLANNING
     trigger_commit: str = ""
     trigger_branch: str = "main"
+    team_id: str = "core-platform"
     suites_run: list[str] = field(default_factory=list)
     failures: list[dict] = field(default_factory=list)
     dom_report: dict = field(default_factory=dict)
@@ -49,6 +50,7 @@ class RunRecord:
     approved_by: str | None = None
     pr_url: str | None = None
     langfuse_trace_id: str | None = None
+    langfuse_trace_url: str | None = None
     input_tokens: int = 0
     output_tokens: int = 0
     cost_usd: float = 0.0
@@ -57,6 +59,8 @@ class RunRecord:
     override_reason: str | None = None
     consecutive_failures: int = 0
     force_hitl: bool = False
+    suite_selection_method: str = "fallback_all"
+    report_text: str | None = None
     created_at: datetime = field(default_factory=datetime.utcnow)
     updated_at: datetime = field(default_factory=datetime.utcnow)
 
@@ -66,6 +70,7 @@ class RunRecord:
             "status": self.status.value if isinstance(self.status, RunStatus) else self.status,
             "trigger_commit": self.trigger_commit,
             "trigger_branch": self.trigger_branch,
+            "team_id": self.team_id,
             "suites_run": self.suites_run,
             "failures": self.failures,
             "dom_report": self.dom_report,
@@ -83,6 +88,7 @@ class RunRecord:
             "approved_by": self.approved_by,
             "pr_url": self.pr_url,
             "langfuse_trace_id": self.langfuse_trace_id,
+            "langfuse_trace_url": self.langfuse_trace_url,
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
             "cost_usd": self.cost_usd,
@@ -91,6 +97,8 @@ class RunRecord:
             "override_reason": self.override_reason,
             "consecutive_failures": self.consecutive_failures,
             "force_hitl": self.force_hitl,
+            "suite_selection_method": self.suite_selection_method,
+            "report_text": self.report_text,
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
         }
@@ -107,6 +115,7 @@ class RunRecord:
             status=RunStatus(d.get("status", "planning")),
             trigger_commit=d.get("trigger_commit", ""),
             trigger_branch=d.get("trigger_branch", "main"),
+            team_id=d.get("team_id", "core-platform"),
             suites_run=d.get("suites_run", []),
             failures=d.get("failures", []),
             dom_report=d.get("dom_report", {}),
@@ -121,6 +130,7 @@ class RunRecord:
             approved_by=d.get("approved_by"),
             pr_url=d.get("pr_url"),
             langfuse_trace_id=d.get("langfuse_trace_id"),
+            langfuse_trace_url=d.get("langfuse_trace_url"),
             input_tokens=d.get("input_tokens", 0),
             output_tokens=d.get("output_tokens", 0),
             cost_usd=d.get("cost_usd", 0.0),
@@ -129,6 +139,8 @@ class RunRecord:
             override_reason=d.get("override_reason"),
             consecutive_failures=d.get("consecutive_failures", 0),
             force_hitl=d.get("force_hitl", False),
+            suite_selection_method=d.get("suite_selection_method", "fallback_all"),
+            report_text=d.get("report_text"),
             created_at=datetime.fromisoformat(d["created_at"]) if d.get("created_at") else datetime.utcnow(),
             updated_at=datetime.fromisoformat(d["updated_at"]) if d.get("updated_at") else datetime.utcnow(),
         )

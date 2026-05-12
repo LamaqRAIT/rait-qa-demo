@@ -42,9 +42,19 @@ export default function LoginPage() {
     }
   }
 
-  function quickLogin(u: { email: string; password: string }) {
+  async function quickLogin(u: { email: string; password: string }) {
     setEmail(u.email);
     setPassword(u.password);
+    setError("");
+    setLoading(true);
+    try {
+      await login(u.email, u.password);
+      router.push("/");
+    } catch {
+      setError("Login failed. Check the backend is reachable.");
+    } finally {
+      setLoading(false);
+    }
   }
 
   return (

@@ -18,7 +18,6 @@ export async function login(email: string, password: string): Promise<{ access_t
   const res = await fetch(`${API}/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    credentials: "include",
     body: JSON.stringify({ email, password }),
   });
   if (!res.ok) throw new Error("Invalid credentials");
@@ -31,7 +30,7 @@ export async function login(email: string, password: string): Promise<{ access_t
 }
 
 export async function logout(): Promise<void> {
-  await fetch(`${API}/auth/logout`, { method: "POST", credentials: "include" });
+  await fetch(`${API}/auth/logout`, { method: "POST", headers: authHeaders() });
   if (typeof window !== "undefined") {
     localStorage.removeItem("rait_access_token");
     localStorage.removeItem("rait_user");

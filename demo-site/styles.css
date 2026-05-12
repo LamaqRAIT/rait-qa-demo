@@ -124,6 +124,13 @@ nav a:hover { color: var(--text); }
 /* Flow 1 DRIFTED state */
 .btn-place-order { background: var(--charcoal); color: var(--cream); }
 
+/* Flow 4 toggle: cart checkout button drift */
+.btn-cart-checkout { background: var(--charcoal); color: var(--cream); text-decoration: none; }
+.btn-cart-checkout:hover { background: #1a1915; }
+/* Flow 4 DRIFTED state */
+.btn-proceed-checkout { background: var(--charcoal); color: var(--cream); text-decoration: none; }
+.btn-proceed-checkout:hover { background: #1a1915; }
+
 .btn-secondary {
   background: transparent;
   color: var(--text);

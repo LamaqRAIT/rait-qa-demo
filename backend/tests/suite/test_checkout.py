@@ -21,7 +21,7 @@ def test_checkout_submit_button_text(page: Page, base_url: str) -> None:
     page.goto(f"{base_url}/checkout.html")
 
     # Flow 2 target: text selector. If drifted to "Place Order" this FAILS.
-    submit_btn = page.locator("button:has-text('Submit Order')")
+    submit_btn = page.locator("button:has-text('Place Order')")
     expect(submit_btn).to_be_visible()
 
 

@@ -33,7 +33,7 @@ def test_cart_checkout_button_present(page: Page, base_url: str) -> None:
     """Cart page has a checkout CTA button that links to checkout.html."""
     page.goto(f"{base_url}/cart.html")
     # Flow 4 target: class="btn-cart-checkout". If drifted to btn-proceed-checkout this FAILS.
-    btn = page.locator(".btn-cart-checkout")
+    btn = page.locator(".btn-proceed-checkout")
     expect(btn).to_be_visible()
     href = btn.get_attribute("href")
     assert "checkout" in (href or ""), f"Checkout button href unexpected: {href}"

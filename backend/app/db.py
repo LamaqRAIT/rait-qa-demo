@@ -704,8 +704,9 @@ async def get_circuit_breaker_events(limit: int = 20) -> list[dict]:
 async def get_recent_error_rate(window: int = 10) -> float:
     async with _session_factory() as s:
         result = await s.execute(text("""
-            SELECT COUNT(*), SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END)
-            FROM (SELECT status FROM qa_runs ORDER BY created_at DESC LIMIT :w)
+            SELECT COUNT(*),
+                   SUM(CASE WHEN status = 'failed' AND (classification IS NULL OR classification = '') THEN 1 ELSE 0 END)
+            FROM (SELECT status, classification FROM qa_runs ORDER BY created_at DESC LIMIT :w)
         """), {"w": window})
         row = result.fetchone()
         total, failures = row[0] or 0, row[1] or 0

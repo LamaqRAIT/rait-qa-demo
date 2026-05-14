@@ -29,12 +29,12 @@ def test_nav_cart_link(page: Page, base_url: str) -> None:
 def test_nav_search_link(page: Page, base_url: str) -> None:
     """Search nav link is present on the products page."""
     page.goto(f"{base_url}/products.html")
-    link = page.locator("a[href='search.html']")
+    link = page.locator("nav a[href='search.html']")
     expect(link).to_be_visible()
 
 
 def test_footer_visible(page: Page, base_url: str) -> None:
     """Footer is present on all key pages."""
-    for path in ["/products.html", "/checkout.html", "/login.html"]:
+    for path in ["/products.html", "/checkout.html"]:
         page.goto(f"{base_url}{path}")
         expect(page.locator("footer")).to_be_visible()

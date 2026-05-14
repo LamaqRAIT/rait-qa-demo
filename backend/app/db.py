@@ -198,8 +198,14 @@ async def _migrate_schema() -> None:
         "ALTER TABLE qa_runs ADD COLUMN IF NOT EXISTS langfuse_trace_url TEXT",
         "ALTER TABLE qa_runs ADD COLUMN IF NOT EXISTS data_json          TEXT DEFAULT '{}'",
         "ALTER TABLE qa_runs ADD COLUMN IF NOT EXISTS updated_at         TIMESTAMP",
-        # Rename old columns if they exist from v1 (no-op if already migrated)
-        # (old 'data' JSON → data_json TEXT handled by create_all on new installs)
+        # system_events — severity column added in v2
+        "ALTER TABLE system_events ADD COLUMN IF NOT EXISTS severity   VARCHAR DEFAULT 'info'",
+        "ALTER TABLE system_events ADD COLUMN IF NOT EXISTS team_id    VARCHAR",
+        "ALTER TABLE system_events ADD COLUMN IF NOT EXISTS meta_json  TEXT DEFAULT '{}'",
+        # tickets — jira columns added in v2
+        "ALTER TABLE tickets ADD COLUMN IF NOT EXISTS jira_remote_id   VARCHAR",
+        "ALTER TABLE tickets ADD COLUMN IF NOT EXISTS jira_url         TEXT",
+        "ALTER TABLE tickets ADD COLUMN IF NOT EXISTS updated_at       TIMESTAMP",
     ]
 
     async with _engine.begin() as conn:

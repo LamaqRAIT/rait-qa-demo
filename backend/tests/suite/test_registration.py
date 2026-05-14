@@ -8,7 +8,7 @@ def test_registration_form_renders(page: Page, base_url: str) -> None:
     """Registration page renders all required form fields."""
     page.goto(f"{base_url}/register.html")
     expect(page.locator("#full-name")).to_be_visible()
-    expect(page.locator("#reg-email")).to_be_visible()
+    expect(page.locator("updated_selector_from_dom_inspection")).to_be_visible()
     expect(page.locator("#reg-password")).to_be_visible()
     expect(page.locator("#confirm-password")).to_be_visible()
     expect(page.locator("#reg-btn")).to_be_visible()

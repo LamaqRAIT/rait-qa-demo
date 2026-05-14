@@ -29,7 +29,7 @@ def test_nav_cart_link(page: Page, base_url: str) -> None:
 def test_nav_search_link(page: Page, base_url: str) -> None:
     """Search nav link is present on the products page."""
     page.goto(f"{base_url}/products.html")
-    link = page.locator("a[href='search.html']")
+    link = page.locator("a[href='search.html' and @class='btn btn-secondary']")
     expect(link).to_be_visible()
 
 

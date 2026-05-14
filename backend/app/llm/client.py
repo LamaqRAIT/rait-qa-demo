@@ -31,17 +31,25 @@ def _compute_cost(model: str, in_tok: int, out_tok: int) -> float:
     return round(in_tok * in_rate + out_tok * out_rate, 6)
 
 
-def _init_langfuse():
+_langfuse_client = None
+
+
+def _get_langfuse():
+    """Return a module-level singleton Langfuse instance (never GC'd between calls)."""
+    global _langfuse_client
+    if _langfuse_client is not None:
+        return _langfuse_client
     settings = get_settings()
     if not settings.langfuse_public_key:
         return None
     try:
         from langfuse import Langfuse
-        return Langfuse(
+        _langfuse_client = Langfuse(
             public_key=settings.langfuse_public_key,
             secret_key=settings.langfuse_secret_key,
             host=settings.get_langfuse_host(),
         )
+        return _langfuse_client
     except Exception:
         return None
 
@@ -105,7 +113,7 @@ async def call_llm(
     Returns (text, input_tokens, output_tokens, cost_usd, model_used, trace_url).
     """
     settings = get_settings()
-    lf = _init_langfuse()
+    lf = _get_langfuse()
     trace = lf.trace(name=call_name, metadata={"run_id": run_id}) if lf else None
 
     raw = ""
@@ -157,19 +165,21 @@ async def call_llm(
                 usage={"input": in_tok, "output": out_tok},
                 metadata={"run_id": run_id, "cost_usd": cost},
             )
-            lf.flush()
+            # Run flush in thread executor — ensures the background sender
+            # completes without blocking the event loop or risking GC of the instance
+            await asyncio.get_event_loop().run_in_executor(None, lf.flush)
             try:
                 trace_url = trace.get_trace_url()
             except Exception:
                 host = settings.get_langfuse_host().rstrip("/")
-                trace_url = f"{host}/trace/{trace.id}"
+                trace_url = f"{host}/traces/{trace.id}"
 
         return raw, in_tok, out_tok, cost, model_used, trace_url
 
     except Exception as exc:
         log.error("llm.error", run_id=run_id, call=call_name, error=str(exc)[:200])
         if trace and lf:
-            lf.flush()
+            await asyncio.get_event_loop().run_in_executor(None, lf.flush)
         return "", 0, 0, 0.0, "none", None
 
 

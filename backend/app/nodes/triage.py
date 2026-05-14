@@ -5,6 +5,7 @@ Classifies test failures from a structured evidence bundle.
 import json
 import structlog
 from app.core.state import TriageResult
+from app.core.intent_parser import extract_test_intents
 from app.llm.client import call_llm, strip_json_fences
 
 log = structlog.get_logger()
@@ -13,6 +14,9 @@ TRIAGE_PROMPT = """You are a QA triage agent for an e-commerce platform. Classif
 
 FAILURES:
 {failures}
+
+TEST INTENTS (what each failing test is actually verifying at a business/behaviour level):
+{test_intents}
 
 DOM INSPECTION REPORT:
 {dom_report}
@@ -31,12 +35,13 @@ Classify as exactly one of:
 - env: Infrastructure problem — network failure, timeout, missing service, canary check failed
 
 Classification rules (apply in order):
+0. Read TEST INTENTS first. If a test intent explicitly states a required destination, value, or behaviour, and the failure directly violates that stated requirement, classify as bug with high confidence — even when DOM candidates exist and even when the commit message is vague.
 1. If canary failed → env (confidence 0.95)
 2. If a recent commit renames a CSS class/attribute that matches the failing selector → drift (confidence 0.90–0.97)
 3. If a recent commit changes text copy matching a failing :has-text selector → drift (confidence 0.90–0.95)
-4. If DOM inspection found a replacement candidate with confidence > 0.80 → drift (confidence 0.85+)
+4. If DOM inspection found a replacement candidate with confidence > 0.80 AND the change still satisfies the test intent → drift (confidence 0.85+)
 5. If the selector still exists on the page (found_on_page=True) → NOT drift, likely bug or env
-6. If a URL/redirect assertion fails and a commit changed the redirect destination → bug (confidence 0.90+)
+6. If a URL/redirect assertion fails AND the test intent explicitly names the expected destination → bug (confidence 0.92+)
 7. If multiple unrelated tests from different suites fail simultaneously → env (confidence 0.85)
 8. If failure is TimeoutError with no commit touching the affected file → env (confidence 0.70)
 9. If failure is an assertion error (wrong value, wrong count, wrong state) with no matching commit → bug (confidence 0.75)
@@ -62,8 +67,10 @@ async def triage(
     Returns (TriageResult, langfuse_trace_url, input_tokens, output_tokens, cost_usd).
     Note: we now return trace_url (full URL) instead of trace_id for direct UI linking.
     """
+    test_intents = extract_test_intents(failures)
     prompt = TRIAGE_PROMPT.format(
         failures=json.dumps(failures, indent=2),
+        test_intents=json.dumps(test_intents, indent=2),
         dom_report=json.dumps(dom_report, indent=2),
         recent_commits=json.dumps(evidence.get("recent_commits", []), indent=2),
         test_history=json.dumps(evidence.get("test_history", {}), indent=2),
@@ -82,7 +89,7 @@ async def triage(
         if not raw:
             # LLM unavailable — use deterministic evidence-based fallback
             log.warning("triage.llm_unavailable", run_id=run_id)
-            return _deterministic_triage(failures, dom_report, evidence)
+            return _deterministic_triage(failures, dom_report, evidence, test_intents)
 
         result = json.loads(strip_json_fences(raw))
         classification = result.get("classification", "env")
@@ -112,7 +119,7 @@ async def triage(
 
     except Exception as exc:
         log.error("triage.error", run_id=run_id, error=str(exc)[:200])
-        return _deterministic_triage(failures, dom_report, evidence)
+        return _deterministic_triage(failures, dom_report, evidence, test_intents)
 
 
 def _infer_test_file(test_name: str) -> str:
@@ -132,6 +139,7 @@ def _deterministic_triage(
     failures: list[dict],
     dom_report: dict,
     evidence: dict,
+    test_intents: list[dict] | None = None,
 ) -> tuple[TriageResult, None, int, int, float]:
     """
     Rule-based fallback when LLM is unavailable.
@@ -235,11 +243,21 @@ def _deterministic_triage(
         )
 
     elif url_failures:
+        # Boost confidence when a test intent explicitly names the redirect destination
+        url_bug_confidence = 0.75
+        intent_evidence = ""
+        if test_intents:
+            for item in test_intents:
+                ti = (item.get("test_intent") or "").lower()
+                if any(kw in ti for kw in ("/dashboard", "/home", "/products", "destination", "redirect", "not any other")):
+                    url_bug_confidence = 0.88
+                    intent_evidence = f" Intent confirms required destination: '{item.get('test_intent', '')}'"
+                    break
         return (
             TriageResult(
                 classification="bug",
-                confidence=0.75,
-                evidence="Deterministic: URL/redirect assertion failure with no matching DOM candidate (deterministic)",
+                confidence=url_bug_confidence,
+                evidence=f"Deterministic: URL/redirect assertion failure with no matching DOM candidate.{intent_evidence} (deterministic)",
                 proposed_fix=None,
             ),
             None, 0, 0, 0.0,

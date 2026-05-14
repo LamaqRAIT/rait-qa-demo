@@ -168,7 +168,7 @@ export default function Dashboard() {
               ))}
               <div className="border-t border-cream/8 pt-2 mt-1 space-y-1.5">
                 <button
-                  onClick={() => handleInjectDrift("flow5", true)}
+                  onClick={() => handleInjectDrift("flow1", true)}
                   disabled={triggering}
                   className={clsx(
                     "w-full text-left px-3 py-2 rounded-lg text-[12px] transition",

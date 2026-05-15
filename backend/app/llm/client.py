@@ -9,6 +9,7 @@ Falls through to Gemini if GOOGLE_API_KEY is set.
 Langfuse trace is created for every call.
 """
 import asyncio
+import json
 import re
 import structlog
 from app.config import get_settings
@@ -47,7 +48,6 @@ def _get_langfuse():
             public_key=settings.langfuse_public_key,
             secret_key=settings.langfuse_secret_key,
             host=settings.get_langfuse_host(),
-            debug=True,
         )
         return _langfuse_client
     except Exception:
@@ -157,19 +157,17 @@ async def call_llm(
 
         trace_url = None
         if trace and lf:
-            try:
-                trace.generation(
-                    name=call_name,
-                    model=model_used,
-                    input=prompt[:2000],
-                    output=raw[:1000],
-                    usage={"input": in_tok, "output": out_tok},
-                    metadata={"run_id": run_id, "cost_usd": cost},
-                )
-                await asyncio.get_running_loop().run_in_executor(None, lf.flush)
-                log.info("langfuse.flush_ok", run_id=run_id, trace_id=trace.id, call=call_name)
-            except Exception as lf_exc:
-                log.warning("langfuse.flush_failed", run_id=run_id, error=str(lf_exc)[:200])
+            trace.generation(
+                name=call_name,
+                model=model_used,
+                input=prompt[:2000],
+                output=raw[:1000],
+                usage={"input": in_tok, "output": out_tok},
+                metadata={"run_id": run_id, "cost_usd": cost},
+            )
+            # Run flush in thread executor — ensures the background sender
+            # completes without blocking the event loop or risking GC of the instance
+            await asyncio.get_event_loop().run_in_executor(None, lf.flush)
             try:
                 trace_url = trace.get_trace_url()
             except Exception:
@@ -180,6 +178,8 @@ async def call_llm(
 
     except Exception as exc:
         log.error("llm.error", run_id=run_id, call=call_name, error=str(exc)[:200])
+        if trace and lf:
+            await asyncio.get_event_loop().run_in_executor(None, lf.flush)
         return "", 0, 0, 0.0, "none", None
 
 

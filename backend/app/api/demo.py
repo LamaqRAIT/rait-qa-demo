@@ -113,8 +113,7 @@ async def _push_change(flow: str, direction: str) -> str:
         )
         return result["commit"].sha
 
-    loop = asyncio.get_event_loop()
-    sha = await loop.run_in_executor(None, _do_push)
+    sha = await asyncio.get_running_loop().run_in_executor(None, _do_push)
     return sha or ""
 
 
@@ -205,10 +204,7 @@ async def _inject_and_run(run_id: str, flow: str) -> None:
 
         run.trigger_commit = sha[:7]
         await db.update_run(run)
-        await _set_node(run, "git_watcher", "running", f"Drift pushed (sha: {sha[:7]}) — waiting for GitHub Pages…")
-
-        deployed = await _wait_for_pages_deployment(sha, timeout=120)
-        await _set_node(run, "git_watcher", "success", f"Drift live on GitHub Pages (sha: {sha[:7]}, deployed={deployed})")
+        await _set_node(run, "git_watcher", "success", f"Drift pushed (sha: {sha[:7]})")
 
     except Exception as exc:
         log.error("demo.inject_error", run_id=run_id, error=str(exc))

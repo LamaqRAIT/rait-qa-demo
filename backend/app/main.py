@@ -53,6 +53,17 @@ async def lifespan(app: FastAPI):
         stop_scheduler()
     except Exception:
         pass
+
+    # Flush Langfuse before container recycles — prevents trace loss on Railway restarts
+    try:
+        from app.llm.client import _get_langfuse
+        lf = _get_langfuse()
+        if lf:
+            lf.shutdown()
+            log.info("langfuse.shutdown_ok")
+    except Exception:
+        pass
+
     log.info("shutdown")
 
 

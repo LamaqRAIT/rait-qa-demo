@@ -27,18 +27,42 @@ settings = get_settings()
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app_instance: FastAPI):
+    # ── OTel instrumentation (before anything else) ────────────────────────────
+    try:
+        from app.telemetry import init_telemetry
+        init_telemetry(app_instance)
+    except Exception as exc:
+        log.warning("telemetry.init_error", error=str(exc)[:100])
+
     await db.init_db()
     log.info("db.ready")
 
-    # Build selector index from test files
+    # ── Build selector index from test files ───────────────────────────────────
     try:
         from app.core.selector_index import build_selector_index
         await build_selector_index()
     except Exception as exc:
         log.warning("selector_index.error", error=str(exc)[:100])
 
-    # Start APScheduler
+    # ── Load NLI model (DeBERTa-v3-small, ~270MB, ~50ms inference) ────────────
+    try:
+        from app.services.nli import init_nli
+        await asyncio.get_event_loop().run_in_executor(None, init_nli)
+    except Exception as exc:
+        log.warning("nli.startup_error", error=str(exc)[:100])
+
+    # ── Load embedding model + pre-compute suite catalogue ────────────────────
+    try:
+        from app.services.embedding import init_embedding, precompute_catalogue
+        from app.core.suite_selector import _get_all_intents
+        await asyncio.get_event_loop().run_in_executor(None, init_embedding)
+        intents = _get_all_intents()
+        await precompute_catalogue(intents)
+    except Exception as exc:
+        log.warning("embedding.startup_error", error=str(exc)[:100])
+
+    # ── Start APScheduler ──────────────────────────────────────────────────────
     try:
         from app.scheduler import start_scheduler
         start_scheduler()
@@ -56,7 +80,7 @@ async def lifespan(app: FastAPI):
     log.info("shutdown")
 
 
-app = FastAPI(title="RAIT QA Agent", lifespan=lifespan)
+app = FastAPI(title="RAIT QA Agent", version="2.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,

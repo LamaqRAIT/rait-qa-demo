@@ -1,0 +1,35 @@
+# Cloud Run GPU service — vLLM serving Gemma 4 26B-A4B AWQ-INT4 on L4 24GB
+# Use the gemma4 Docker tag (fixes AWQ bug present in vLLM 0.19.1)
+# Target: 4 vCPU / 16GiB RAM / 1x NVIDIA L4 (24GB VRAM), min-instances=0, us-central1
+FROM vllm/vllm-openai:gemma4
+
+# Model weights are NOT baked in — they're loaded from GCS at cold start.
+# Startup script downloads from gs://rait-qa-model-weights/gemma-4-26b-a4b-awq/
+# to /model-weights/ before launching vLLM. Cold start: ~25-50s total.
+COPY docker/download_model.sh /app/download_model.sh
+RUN chmod +x /app/download_model.sh
+
+EXPOSE 8000
+
+ENV MODEL_PATH=/model-weights/gemma-4-26b-a4b-awq
+ENV HF_HOME=/model-weights/hf-cache
+
+# Entrypoint: download model weights from GCS then start vLLM
+ENTRYPOINT ["/bin/sh", "-c", \
+  "/app/download_model.sh && \
+  vllm serve ${MODEL_PATH} \
+    --quantization awq \
+    --dtype float16 \
+    --max-model-len 8192 \
+    --gpu-memory-utilization 0.90 \
+    --enable-prefix-caching \
+    --enable-chunked-prefill \
+    --kv-cache-dtype fp8 \
+    --speculative-model google/gemma-4-E2B-it \
+    --speculative-num-speculative-tokens 5 \
+    --reasoning-parser gemma4 \
+    --tool-call-parser gemma4 \
+    --enable-auto-tool-choice \
+    --otlp-traces-endpoint http://localhost:4317 \
+    --host 0.0.0.0 \
+    --port 8000"]

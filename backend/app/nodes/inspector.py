@@ -85,11 +85,35 @@ async def inspect_dom(run_id: str, failures: list[dict]) -> dict:
                     "match_reason": c.get("match_reason", ""),
                 })
         log.info("inspector.done", run_id=run_id, candidates=len(all_candidates))
-        return {
+        dom_result = {
             "inspected": True,
             "url": url,
             "changed_selectors": all_candidates,
         }
+
+        # Upload DOM snapshot to GCS for replay / fine-tuning corpus
+        try:
+            from app.services.gcs import upload_json, get_dom_snapshots_bucket
+            import datetime
+            snapshot = {
+                "run_id": run_id,
+                "timestamp": datetime.datetime.utcnow().isoformat(),
+                "url": url,
+                "failures": failures,
+                "candidates": all_candidates,
+                "raw_inspector_result": result,
+            }
+            gcs_path = await upload_json(
+                bucket_name=get_dom_snapshots_bucket(),
+                object_path=f"{run_id}/dom_snapshot.json",
+                data=snapshot,
+            )
+            if gcs_path:
+                dom_result["gcs_path"] = gcs_path
+        except Exception as gcs_exc:
+            log.warning("inspector.gcs_upload_skipped", run_id=run_id, error=str(gcs_exc)[:100])
+
+        return dom_result
     except Exception as exc:
         log.error("inspector.parse_error", run_id=run_id, error=str(exc))
         return {"inspected": False, "error": str(exc)}

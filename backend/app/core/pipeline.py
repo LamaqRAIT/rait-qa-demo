@@ -13,7 +13,7 @@ from app.core.state import RunRecord, RunStatus, NodeState
 from app.core.evidence import build_evidence_bundle, get_recent_commits, build_test_history
 from app.core.circuit_breaker import (
     check_cost_and_record, should_quarantine, record_quarantine,
-    get_effective_threshold, run_all_checks,
+    run_all_checks,
 )
 from app.core.suite_selector import select_suites
 from app.config import get_settings
@@ -60,13 +60,14 @@ async def run_pipeline(run_id: str) -> None:
 
         # ── Smart suite selection ──────────────────────────────────────────────
         await _set_node(run, "change_analyzer", "running", "Analysing changed files → selecting test suites…")
-        suites, method, llm_hitl_flag = await select_suites(run.trigger_commit)
+        suites, method, force_hitl_flag, embedding_scores = await select_suites(run.trigger_commit)
         run.suites_run = suites
         run.suite_selection_method = method
-        run.force_hitl = run.force_hitl or llm_hitl_flag
+        run.force_hitl = run.force_hitl or force_hitl_flag
+        run.suite_selection_scores = embedding_scores
         await _set_node(
             run, "change_analyzer", "success",
-            f"[{method}] Suites: {', '.join(suites) or 'all'}" + (" — HITL recommended by LLM" if llm_hitl_flag else ""),
+            f"[{method}] Suites: {', '.join(suites) or 'all'}",
         )
 
         # ── Canary checks ─────────────────────────────────────────────────────
@@ -123,6 +124,8 @@ async def run_pipeline(run_id: str) -> None:
         dom_report = await inspect_dom(run_id, failures)
         run.dom_report = dom_report
         run.node_timings["browser_inspector"] = round(time.time() - t0, 2)
+        if dom_report.get("gcs_path"):
+            run.dom_snapshot_gcs_path = dom_report["gcs_path"]
 
         changed = len(dom_report.get("changed_selectors", []))
         ambiguous_dom = _dom_is_ambiguous(dom_report)
@@ -137,43 +140,59 @@ async def run_pipeline(run_id: str) -> None:
 
         # ── Evidence bundle ────────────────────────────────────────────────────
         recent_commits = get_recent_commits(run_id)
-        test_history = build_test_history(failures, run.consecutive_failures)
+        test_history = await build_test_history(failures, run.consecutive_failures)
         evidence = build_evidence_bundle(failures, dom_report, recent_commits, test_history)
         run.evidence = evidence
 
-        # ── Triage (LLM) ──────────────────────────────────────────────────────
-        await _set_node(run, "classifier", "running", "Classifying failures with LLM…")
+        # ── Triage (vLLM two-step) ────────────────────────────────────────────
+        await _set_node(run, "classifier", "running", "Classifying failures with vLLM…")
         t0 = time.time()
         await _transition(run, RunStatus.TRIAGING)
-        triage_result, trace_url, input_tok, output_tok, cost = await triage(
+        (
+            triage_result, trace_url, input_tok, output_tok, cost,
+            p_class, logprob_margin, ttft_ms, triage_total_ms,
+        ) = await triage(
             run_id, failures, dom_report, evidence, suite_selection_method=run.suite_selection_method
         )
         run.triage = triage_result
         run.node_timings["classifier"] = round(time.time() - t0, 2)
         run.consecutive_failures += 1
-        if trace_url:
-            run.langfuse_trace_url = trace_url
         run.input_tokens = input_tok
         run.output_tokens = output_tok
         run.cost_usd = cost
+        run.triage_ttft_ms = ttft_ms
+        run.triage_total_ms = triage_total_ms
         await db.update_run(run)
 
-        # Cost circuit breaker
-        if not await check_cost_and_record(run.cost_usd, run_id):
-            await _set_node(run, "classifier", "failed", f"Cost limit exceeded (${run.cost_usd:.4f}) — aborting")
-            await _transition(run, RunStatus.FAILED)
-            await run_all_checks(run_id)
-            return
-
         classification = triage_result.classification
-        confidence = triage_result.confidence
-        threshold = get_effective_threshold()
 
-        # ── Route based on classification ──────────────────────────────────────
-        if classification == "drift" and confidence >= threshold and not run.force_hitl:
+        # ── Confidence gate (5 signals) ────────────────────────────────────────
+        from app.core.confidence_gate import evaluate as gate_evaluate
+        gate = await gate_evaluate(
+            classification=classification,
+            p_class=p_class,
+            logprob_margin=logprob_margin,
+            evidence_text=triage_result.evidence,
+            proposed_fix=triage_result.proposed_fix,
+            dom_report=dom_report,
+        )
+        run.p_class = gate.p_class
+        run.logprob_margin = gate.logprob_margin
+        run.nli_entailment = gate.nli_entailment
+        run.fix_grounded = gate.fix_grounded
+        run.dom_corroboration = gate.dom_corroboration
+        run.gate_route = gate.route
+        run.gate_held_checks = gate.held_checks
+        run.nli_latency_ms = gate.nli_latency_ms
+        await db.update_run(run)
+
+        gate_summary = f"gate={gate.route}, p={gate.p_class:.2f}" if gate.p_class else f"gate={gate.route} (deterministic)"
+
+        # ── Route based on classification + gate ──────────────────────────────
+        if classification == "drift" and gate.route == "auto_fix" and not run.force_hitl:
             await _set_node(
                 run, "classifier", "success",
-                f"DRIFT — {confidence:.0%} — auto-fix eligible (threshold {threshold:.0%})",
+                f"DRIFT — {gate_summary} — auto-fix eligible",
             )
             await _set_node(run, "auto_fixer", "running", "Applying selector fix…")
             await _set_node(run, "ticket_creator", "skipped", "Drift — no ticket needed")
@@ -181,16 +200,15 @@ async def run_pipeline(run_id: str) -> None:
             await _apply_fix_and_complete(run)
 
         elif classification == "drift":
-            # Dynamic HITL: low confidence OR forced (DOM ambiguity, LLM recommendation, circuit breaker)
-            reasons = []
-            if confidence < threshold:
-                reasons.append(f"confidence {confidence:.0%} < threshold {threshold:.0%}")
+            # Gate routed to human_review or force_hitl is set
+            reasons = gate.held_checks if gate.held_checks else []
             if run.force_hitl:
-                reasons.append("forced (DOM ambiguous / LLM flag / demo)")
-            reason_str = " + ".join(reasons)
+                reasons = reasons + ["forced (DOM ambiguous / demo)"]
+            reason_str = ", ".join(reasons) or "gate held"
+            p_display = f"{gate.p_class:.0%}" if gate.p_class else "n/a"
             await _set_node(
                 run, "classifier", "waiting",
-                f"DRIFT — {confidence:.0%} — HITL: {reason_str}",
+                f"DRIFT — p_class={p_display} — HITL: {reason_str}",
             )
             await _set_node(run, "human_review", "waiting", "Awaiting human approval")
             await _transition(run, RunStatus.AWAITING_HUMAN)
@@ -198,14 +216,15 @@ async def run_pipeline(run_id: str) -> None:
             # Slack HITL card
             try:
                 from app.integrations.slack import notify_hitl
-                await notify_hitl(run_id, confidence, triage_result.proposed_fix, team_id=run.team_id)
+                await notify_hitl(run_id, triage_result.confidence, triage_result.proposed_fix, team_id=run.team_id)
             except Exception:
                 pass
             log.info("pipeline.awaiting_human", run_id=run_id, reason=reason_str)
 
         elif classification == "bug":
-            severity = "HIGH" if confidence >= 0.9 else "MEDIUM"
-            await _set_node(run, "classifier", "failed", f"BUG — {confidence:.0%} — severity: {severity}")
+            p_display = f"{triage_result.confidence:.0%}" if triage_result.confidence else "n/a"
+            severity = "HIGH" if triage_result.confidence >= 0.9 else "MEDIUM"
+            await _set_node(run, "classifier", "failed", f"BUG — {p_display} — severity: {severity}")
             await _set_node(run, "auto_fixer", "skipped", "BUG — no auto-fix")
             await _set_node(run, "ticket_creator", "running", "Filing bug ticket…")
 
@@ -217,7 +236,7 @@ async def run_pipeline(run_id: str) -> None:
                 await _set_node(run, "ticket_creator", "success", f"{ticket_key} filed — {severity}{jira_note}")
 
                 from app.integrations.slack import notify_bug
-                await notify_bug(run_id, ticket_key, triage_result.evidence, confidence, team_id=run.team_id)
+                await notify_bug(run_id, ticket_key, triage_result.evidence, triage_result.confidence, team_id=run.team_id)
             except Exception as exc:
                 log.error("pipeline.bug_ticket_error", run_id=run_id, error=str(exc)[:100])
                 await _set_node(run, "ticket_creator", "success", f"BUG-{run_id[:4].upper()} created (local)")
@@ -228,7 +247,8 @@ async def run_pipeline(run_id: str) -> None:
             await _transition(run, RunStatus.FAILED)
 
         else:  # env
-            await _set_node(run, "classifier", "failed", f"ENV — {confidence:.0%}")
+            p_display = f"{triage_result.confidence:.0%}" if triage_result.confidence else "n/a"
+            await _set_node(run, "classifier", "failed", f"ENV — {p_display}")
             await _set_node(run, "auto_fixer", "skipped", "ENV issue — no auto-fix")
             await _set_node(run, "ticket_creator", "running", "Filing environment alert…")
 
@@ -282,6 +302,20 @@ async def _apply_fix_and_complete(run: RunRecord) -> None:
         await _set_node(run, "reporter", "success", "Run complete ✓")
         run.consecutive_failures = 0
         await _transition(run, RunStatus.COMPLETE)
+
+        # Store to failure_patterns corpus for future calibration / RAG
+        if not run.human_override and run.gate_route == "auto_fix":
+            try:
+                await db.store_failure_pattern(
+                    run_id=run.id,
+                    original_class=run.triage.classification,
+                    verified_class=run.triage.classification,
+                    evidence={"failures": run.failures, "dom_report": run.dom_report},
+                    triage_prompt_hash=None,
+                    verified=False,
+                )
+            except Exception as fp_exc:
+                log.warning("pipeline.failure_pattern.error", run_id=run.id, error=str(fp_exc)[:100])
 
     except Exception as exc:
         log.error("pipeline.fix_error", run_id=run.id, error=str(exc))

@@ -1,0 +1,36 @@
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-f'
+      - 'backend/docker/Dockerfile.cpu'
+      - '-t'
+      - 'us-central1-docker.pkg.dev/rait-qa-agent/rait-qa-images/backend:$COMMIT_SHA'
+      - '-t'
+      - 'us-central1-docker.pkg.dev/rait-qa-agent/rait-qa-images/backend:latest'
+      - 'backend'
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'us-central1-docker.pkg.dev/rait-qa-agent/rait-qa-images/backend:$COMMIT_SHA']
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'us-central1-docker.pkg.dev/rait-qa-agent/rait-qa-images/backend:latest']
+
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'rait-qa-backend'
+      - '--image=us-central1-docker.pkg.dev/rait-qa-agent/rait-qa-images/backend:$COMMIT_SHA'
+      - '--region=us-central1'
+      - '--project=rait-qa-agent'
+      - '--quiet'
+
+images:
+  - 'us-central1-docker.pkg.dev/rait-qa-agent/rait-qa-images/backend:$COMMIT_SHA'
+  - 'us-central1-docker.pkg.dev/rait-qa-agent/rait-qa-images/backend:latest'
+
+options:
+  machineType: 'E2_HIGHCPU_8'
+  logging: CLOUD_LOGGING_ONLY

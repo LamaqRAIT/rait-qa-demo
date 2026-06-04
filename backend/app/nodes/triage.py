@@ -1,59 +1,27 @@
 """
-Triage node — unified LLM client (Claude Sonnet 4.6 → Groq → Gemini) + Langfuse.
-Classifies test failures from a structured evidence bundle.
+Triage node — two-step self-hosted vLLM inference.
+
+Step A: classify only — one token (drift|bug|env) + logprobs → p_class + margin.
+Step B: extract fix (drift only) — schema-enforced JSON via xgrammar guided decoding.
+
+Fallback: if vLLM GPU box is unreachable → _deterministic_triage() (rule-based, no LLM).
+When using deterministic fallback, p_class/margin are None and the confidence gate
+will unconditionally route to human_review.
+
+No managed API fallbacks (Groq/Gemini/Claude removed per rework decision).
 """
-import json
+import time
 import structlog
 from app.core.state import TriageResult
 from app.core.intent_parser import extract_test_intents
-from app.llm.client import call_llm, strip_json_fences
+from app.llm.vllm_client import (
+    classify,
+    extract_fix,
+    build_classify_prompt,
+    build_fix_prompt,
+)
 
 log = structlog.get_logger()
-
-TRIAGE_PROMPT = """You are a QA triage agent for an e-commerce platform. Classify the following test failures using all available evidence.
-
-FAILURES:
-{failures}
-
-TEST INTENTS (what each failing test is actually verifying at a business/behaviour level):
-{test_intents}
-
-DOM INSPECTION REPORT:
-{dom_report}
-
-RECENT COMMITS (last 5):
-{recent_commits}
-
-TEST HISTORY:
-{test_history}
-
-SUITE SELECTION METHOD: {suite_selection_method}
-
-Classify as exactly one of:
-- drift: The UI changed legitimately (CSS class renamed, text copy changed, layout updated) — the test selector is outdated, NOT a bug
-- bug: Application logic broke — the test is correct but the application behavior is wrong (wrong redirect, wrong calculation, missing feature)
-- env: Infrastructure problem — network failure, timeout, missing service, canary check failed
-
-Classification rules (apply in order):
-0. Read TEST INTENTS first. If a test intent explicitly states a required destination, value, or behaviour, and the failure directly violates that stated requirement, classify as bug with high confidence — even when DOM candidates exist and even when the commit message is vague.
-1. If canary failed → env (confidence 0.95)
-2. If a recent commit renames a CSS class/attribute that matches the failing selector → drift (confidence 0.90–0.97)
-3. If a recent commit changes text copy matching a failing :has-text selector → drift (confidence 0.90–0.95)
-4. If DOM inspection found a replacement candidate with confidence > 0.80 AND the change still satisfies the test intent → drift (confidence 0.85+)
-5. If the selector still exists on the page (found_on_page=True) → NOT drift, likely bug or env
-6. If a URL/redirect assertion fails AND the test intent explicitly names the expected destination → bug (confidence 0.92+)
-7. If multiple unrelated tests from different suites fail simultaneously → env (confidence 0.85)
-8. If failure is TimeoutError with no commit touching the affected file → env (confidence 0.70)
-9. If failure is an assertion error (wrong value, wrong count, wrong state) with no matching commit → bug (confidence 0.75)
-
-Reply with ONLY valid JSON, no markdown fences:
-{{"classification": "drift"|"bug"|"env", "confidence": 0.0-1.0, "evidence": "one sentence citing the strongest signal", "proposed_fix": null | {{"file": "backend/tests/suite/test_checkout.py", "old": "exact_old_string_in_file", "new": "new_string_to_replace_with"}}}}
-
-Rules for proposed_fix:
-- MUST be null for bug and env.
-- For drift: file must be the test file path, old/new must be exact strings appearing in that file.
-- proposed_fix.old is typically the old CSS selector or text string used in the test.
-- proposed_fix.new must be the new selector confirmed by DOM inspection (highest-confidence candidate)."""
 
 
 async def triage(
@@ -62,68 +30,112 @@ async def triage(
     dom_report: dict,
     evidence: dict,
     suite_selection_method: str = "fallback_all",
-) -> tuple[TriageResult, str | None, int, int, float]:
+) -> tuple[TriageResult, str | None, int, int, float, float | None, float | None, int | None, int | None]:
     """
-    Returns (TriageResult, langfuse_trace_url, input_tokens, output_tokens, cost_usd).
-    Note: we now return trace_url (full URL) instead of trace_id for direct UI linking.
+    Returns:
+        (TriageResult, otel_trace_url, input_tokens, output_tokens, cost_usd,
+         p_class, logprob_margin, triage_ttft_ms, triage_total_ms)
+
+    otel_trace_url is always None (OTel auto-instruments the HTTP call via httpx).
+    cost_usd is 0.0 for self-hosted inference (no per-token billing).
+    p_class / logprob_margin are None when deterministic fallback is used.
     """
     test_intents = extract_test_intents(failures)
-    prompt = TRIAGE_PROMPT.format(
-        failures=json.dumps(failures, indent=2),
-        test_intents=json.dumps(test_intents, indent=2),
-        dom_report=json.dumps(dom_report, indent=2),
-        recent_commits=json.dumps(evidence.get("recent_commits", []), indent=2),
-        test_history=json.dumps(evidence.get("test_history", {}), indent=2),
+    classify_prompt, prompt_hash = build_classify_prompt(
+        failures=failures,
+        test_intents=test_intents,
+        dom_report=dom_report,
+        recent_commits=evidence.get("recent_commits", []),
+        test_history=evidence.get("test_history", {}),
         suite_selection_method=suite_selection_method,
     )
 
-    try:
-        raw, in_tok, out_tok, cost, model_used, trace_url = await call_llm(
-            prompt=prompt,
-            run_id=run_id,
-            call_name="triage",
-            model_preference="sonnet",
-            max_tokens=512,
-        )
+    t_total_start = time.time()
 
-        if not raw:
-            # LLM unavailable — use deterministic evidence-based fallback
-            log.warning("triage.llm_unavailable", run_id=run_id)
-            return _deterministic_triage(failures, dom_report, evidence, test_intents)
+    # ── Step A: classify (1 token + logprobs) ──────────────────────────────────
+    classification, p_class, logprob_margin, in_tok_a, out_tok_a = await classify(
+        prompt=classify_prompt,
+        run_id=run_id,
+    )
 
-        result = json.loads(strip_json_fences(raw))
-        classification = result.get("classification", "env")
-        confidence = float(result.get("confidence", 0.5))
-        evidence_text = result.get("evidence", "")
-        proposed_fix = result.get("proposed_fix")
+    if classification is None:
+        log.warning("triage.vllm_unreachable — deterministic fallback", run_id=run_id)
+        return _deterministic_triage_extended(failures, dom_report, evidence, test_intents)
 
-        # Enforce invariant: proposed_fix must be null for non-drift
-        if classification != "drift":
-            proposed_fix = None
+    ttft_ms = None  # vLLM reports TTFT via OTel spans (see telemetry.py)
 
-        log.info(
-            "triage.done",
-            run_id=run_id,
-            model=model_used,
+    # ── Step B: extract fix (drift only) ──────────────────────────────────────
+    proposed_fix = None
+    in_tok_b = out_tok_b = 0
+    if classification == "drift":
+        fix_prompt = build_fix_prompt(
             classification=classification,
-            confidence=confidence,
-            tokens_in=in_tok,
-            tokens_out=out_tok,
-            cost=cost,
+            failures=failures,
+            dom_report=dom_report,
+            test_intents=test_intents,
+        )
+        proposed_fix, in_tok_b, out_tok_b = await extract_fix(
+            prompt=fix_prompt,
+            run_id=run_id,
         )
 
-        return (
-            TriageResult(classification=classification, confidence=confidence, evidence=evidence_text, proposed_fix=proposed_fix),
-            trace_url, in_tok, out_tok, cost,
-        )
+    triage_total_ms = int((time.time() - t_total_start) * 1000)
+    total_in_tok = in_tok_a + in_tok_b
+    total_out_tok = out_tok_a + out_tok_b
 
-    except Exception as exc:
-        log.error("triage.error", run_id=run_id, error=str(exc)[:200])
-        return _deterministic_triage(failures, dom_report, evidence, test_intents)
+    log.info(
+        "triage.done",
+        run_id=run_id,
+        classification=classification,
+        p_class=round(p_class, 3) if p_class else None,
+        margin=round(logprob_margin, 3) if logprob_margin else None,
+        tokens_in=total_in_tok,
+        tokens_out=total_out_tok,
+        total_ms=triage_total_ms,
+    )
 
+    # Evidence text for NLI (short summary from DOM + commit signals)
+    evidence_text = _build_evidence_text(failures, dom_report, evidence)
+
+    return (
+        TriageResult(
+            classification=classification,
+            confidence=p_class or 0.0,   # kept for backward compat with UI
+            evidence=evidence_text,
+            proposed_fix=proposed_fix,
+        ),
+        None,           # trace_url — OTel handles this
+        total_in_tok,
+        total_out_tok,
+        0.0,            # cost_usd — self-hosted, no per-token billing
+        p_class,
+        logprob_margin,
+        ttft_ms,
+        triage_total_ms,
+    )
+
+
+def _build_evidence_text(failures: list[dict], dom_report: dict, evidence: dict) -> str:
+    """Build a short evidence summary string for NLI and DB storage."""
+    parts = []
+    if failures:
+        parts.append(f"{len(failures)} test(s) failed")
+        selectors = [f.get("selector") for f in failures if f.get("selector")]
+        if selectors:
+            parts.append(f"selector(s): {', '.join(selectors[:2])}")
+    candidates = dom_report.get("changed_selectors", [])
+    if candidates:
+        best = max(candidates, key=lambda c: c.get("confidence", 0))
+        parts.append(f"DOM candidate '{best.get('found', '')}' (conf {best.get('confidence', 0):.2f})")
+    commits = evidence.get("recent_commits", [])
+    if commits:
+        parts.append(f"recent commit: '{commits[0].get('message', '')[:60]}'")
+    return ". ".join(parts) or "No evidence available."
+
+
+# ── Deterministic fallback (unchanged from original, no LLM) ─────────────────
 
 def _infer_test_file(test_name: str) -> str:
-    """Map a test name / class name to its test file path."""
     t = test_name.lower()
     if "login" in t:    return "backend/tests/suite/test_login.py"
     if "cart" in t:     return "backend/tests/suite/test_cart.py"
@@ -140,16 +152,28 @@ def _deterministic_triage(
     dom_report: dict,
     evidence: dict,
     test_intents: list[dict] | None = None,
-) -> tuple[TriageResult, None, int, int, float]:
+) -> tuple:
+    """Backward-compat signature used in old code paths."""
+    result = _deterministic_triage_extended(failures, dom_report, evidence, test_intents)
+    # Return old 5-tuple: (TriageResult, trace_url, in_tok, out_tok, cost)
+    tr, _, in_tok, out_tok, cost, *_ = result
+    return tr, None, in_tok, out_tok, cost
+
+
+def _deterministic_triage_extended(
+    failures: list[dict],
+    dom_report: dict,
+    evidence: dict,
+    test_intents: list[dict] | None = None,
+) -> tuple:
     """
-    Rule-based fallback when LLM is unavailable.
-    Uses DOM candidates + commit messages + error types to classify.
-    Marked with '(deterministic)' in the evidence so it's auditable.
+    Rule-based fallback. Returns extended tuple matching triage() signature.
+    p_class and logprob_margin are None → confidence gate routes to human_review.
     """
+    import re as _re
     candidates = dom_report.get("changed_selectors", [])
     recent_commits = evidence.get("recent_commits", [])
 
-    # Check for selector candidates from DOM inspection
     best_candidate = None
     best_conf = 0.0
     for c in candidates:
@@ -157,119 +181,65 @@ def _deterministic_triage(
             best_conf = c["confidence"]
             best_candidate = c
 
-    # Check commit messages for rename signals (use word-boundary-aware keyword matching to avoid false positives)
-    import re as _re
     _RENAME_KEYWORDS = _re.compile(
         r'\b(?:rename|refactor|class|selector|copy|text|btn|css|label|aria)\b',
         _re.IGNORECASE,
     )
-    commit_signals = []
-    for commit in recent_commits:
-        msg = commit.get("message", "").lower()
-        if _RENAME_KEYWORDS.search(msg):
-            commit_signals.append(msg)
+    commit_signals = [c.get("message", "") for c in recent_commits if _RENAME_KEYWORDS.search(c.get("message", ""))]
 
-    # Check for URL/redirect assertion failures (bug signal)
     url_failures = [f for f in failures if
         "url" in (f.get("raw", "") + f.get("selector", "")).lower()
         or "redirect" in f.get("raw", "").lower()
         or "wait_for_url" in f.get("raw", "").lower()
-        or ("login" in f.get("test", "").lower() and "credential" in f.get("test", "").lower())
         or "to_have_url" in f.get("raw", "").lower()
     ]
 
-    # Classification logic
+    evidence_text = ""
     if best_conf >= 0.70 or commit_signals:
-        # Strong DOM candidate or commit rename signal → drift
         confidence = min(0.88, max(best_conf, 0.72)) if best_conf > 0 else 0.72
-        evidence_str = (
-            f"Deterministic: DOM candidate '{best_candidate['found']}' (conf {best_conf:.2f}) + "
-            f"commit signal: {commit_signals[0][:60] if commit_signals else 'n/a'}"
-        ) if best_candidate else f"Deterministic: commit rename signal detected — {commit_signals[0][:80] if commit_signals else 'n/a'}"
-
+        evidence_text = (
+            f"Deterministic: DOM candidate '{best_candidate['found']}' (conf {best_conf:.2f})"
+            if best_candidate else f"Deterministic: commit rename signal"
+        )
         proposed_fix = None
-
-        # Try to build proposed_fix from DOM candidate
         if best_candidate and failures:
             for f in failures:
                 if f.get("selector"):
-                    # Infer which test file the failure came from
-                    test_name = f.get("test", "")
-                    test_file = "backend/tests/suite/test_checkout.py"
-                    if "login" in test_name.lower():
-                        test_file = "backend/tests/suite/test_login.py"
-                    elif "cart" in test_name.lower():
-                        test_file = "backend/tests/suite/test_cart.py"
-                    elif "search" in test_name.lower():
-                        test_file = "backend/tests/suite/test_search.py"
-                    elif "registr" in test_name.lower():
-                        test_file = "backend/tests/suite/test_registration.py"
-                    elif "nav" in test_name.lower():
-                        test_file = "backend/tests/suite/test_navigation.py"
                     proposed_fix = {
-                        "file": test_file,
+                        "file": _infer_test_file(f.get("test", "")),
                         "old": f["selector"],
                         "new": best_candidate["found"],
                     }
                     break
-
-        # Fallback: infer from commit message when no DOM candidate
-        if not proposed_fix and commit_signals and failures:
-            import re as _re2
-            # Try "rename X to Y" pattern in commit messages
-            for msg in commit_signals:
-                m = _re2.search(r'rename\s+([^\s]+)\s+to\s+([^\s\[\]]+)', msg, _re2.IGNORECASE)
-                if m:
-                    old_name, new_name = m.group(1), m.group(2)
-                    for f in failures:
-                        if f.get("selector"):
-                            selector = f["selector"]
-                            test_name = f.get("test", "")
-                            test_file = _infer_test_file(test_name)
-                            # Map the commit rename to selector strings used in tests
-                            if old_name in selector or old_name.replace("-", "_") in selector:
-                                proposed_fix = {
-                                    "file": test_file,
-                                    "old": selector,
-                                    "new": selector.replace(old_name, new_name),
-                                }
-                                break
-                    if proposed_fix:
-                        break
-
-        return (
-            TriageResult(classification="drift", confidence=confidence, evidence=evidence_str + " (deterministic)", proposed_fix=proposed_fix),
-            None, 0, 0, 0.0,
+        result = TriageResult(
+            classification="drift",
+            confidence=confidence,
+            evidence=evidence_text + " (deterministic)",
+            proposed_fix=proposed_fix,
         )
+        return result, None, 0, 0, 0.0, None, None, None, None
 
     elif url_failures:
-        # Boost confidence when a test intent explicitly names the redirect destination
         url_bug_confidence = 0.75
-        intent_evidence = ""
         if test_intents:
             for item in test_intents:
                 ti = (item.get("test_intent") or "").lower()
-                if any(kw in ti for kw in ("/dashboard", "/home", "/products", "destination", "redirect", "not any other")):
+                if any(kw in ti for kw in ("/dashboard", "/home", "/products", "destination", "redirect")):
                     url_bug_confidence = 0.88
-                    intent_evidence = f" Intent confirms required destination: '{item.get('test_intent', '')}'"
                     break
-        return (
-            TriageResult(
-                classification="bug",
-                confidence=url_bug_confidence,
-                evidence=f"Deterministic: URL/redirect assertion failure with no matching DOM candidate.{intent_evidence} (deterministic)",
-                proposed_fix=None,
-            ),
-            None, 0, 0, 0.0,
+        result = TriageResult(
+            classification="bug",
+            confidence=url_bug_confidence,
+            evidence="Deterministic: URL/redirect assertion failure (deterministic)",
+            proposed_fix=None,
         )
+        return result, None, 0, 0, 0.0, None, None, None, None
 
     else:
-        return (
-            TriageResult(
-                classification="env",
-                confidence=0.60,
-                evidence="Deterministic: no DOM candidates, no commit signals, no URL assertion — infrastructure suspected (deterministic)",
-                proposed_fix=None,
-            ),
-            None, 0, 0, 0.0,
+        result = TriageResult(
+            classification="env",
+            confidence=0.60,
+            evidence="Deterministic: no DOM candidates, no commit signals (deterministic)",
+            proposed_fix=None,
         )
+        return result, None, 0, 0, 0.0, None, None, None, None

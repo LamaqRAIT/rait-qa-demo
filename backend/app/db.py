@@ -23,7 +23,7 @@ class DBRunRecord(Base):
     id                      = Column(String, primary_key=True)
     status                  = Column(String, default="planning")
     classification          = Column(String, nullable=True)
-    confidence              = Column(Float, nullable=True)
+    confidence              = Column(Float, nullable=True)   # deprecated; kept for backward compat
     cost_usd                = Column(Float, default=0.0)
     input_tokens            = Column(Integer, default=0)
     output_tokens           = Column(Integer, default=0)
@@ -35,6 +35,27 @@ class DBRunRecord(Base):
     report_text             = Column(Text, nullable=True)
     langfuse_trace_url      = Column(Text, nullable=True)
     data_json               = Column(Text, default="{}")
+    # Confidence gate signals (rework v2)
+    p_class                 = Column(Float, nullable=True)
+    logprob_margin          = Column(Float, nullable=True)
+    nli_entailment          = Column(Float, nullable=True)
+    fix_grounded            = Column(Boolean, nullable=True)
+    dom_corroboration       = Column(Float, nullable=True)
+    gate_route              = Column(String, nullable=True)   # auto_fix | human_review
+    gate_held_checks        = Column(Text, nullable=True)     # JSON list of failed signal names
+    # Suite embedding scores
+    suite_selection_scores  = Column(Text, nullable=True)     # JSON {suite: cosine_score}
+    # GCS DOM snapshot
+    dom_snapshot_gcs_path   = Column(String, nullable=True)
+    # Latency breakdown (ms)
+    triage_ttft_ms          = Column(Integer, nullable=True)
+    triage_total_ms         = Column(Integer, nullable=True)
+    nli_latency_ms          = Column(Integer, nullable=True)
+    embedding_latency_ms    = Column(Integer, nullable=True)
+    # Triage prompt/response for replay
+    triage_prompt           = Column(Text, nullable=True)
+    triage_response         = Column(Text, nullable=True)
+    triage_prompt_hash      = Column(String, nullable=True)
     created_at              = Column(DateTime, default=datetime.utcnow)
     updated_at              = Column(DateTime, default=datetime.utcnow)
 
@@ -134,10 +155,14 @@ class DBFlakinesScore(Base):
 
 class DBFailurePattern(Base):
     __tablename__ = "failure_patterns"
-    id             = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    selector       = Column(Text)
-    outcome        = Column(String)
-    created_at     = Column(DateTime, default=datetime.utcnow)
+    id                  = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    original_class      = Column(String)           # classification from triage
+    verified_class      = Column(String)           # confirmed by human or auto-confirmed
+    evidence_json       = Column(Text, default="{}") # failures + dom_report snapshot
+    triage_prompt_hash  = Column(String, nullable=True)
+    verified            = Column(Boolean, default=False)  # True = human-verified
+    run_id              = Column(String, nullable=True)
+    created_at          = Column(DateTime, default=datetime.utcnow)
 
 
 class DBSyntheticRun(Base):
@@ -206,6 +231,30 @@ async def _migrate_schema() -> None:
         "ALTER TABLE tickets ADD COLUMN IF NOT EXISTS jira_remote_id   VARCHAR",
         "ALTER TABLE tickets ADD COLUMN IF NOT EXISTS jira_url         TEXT",
         "ALTER TABLE tickets ADD COLUMN IF NOT EXISTS updated_at       TIMESTAMP",
+        # qa_runs — confidence gate signals (rework v2)
+        "ALTER TABLE qa_runs ADD COLUMN IF NOT EXISTS p_class               FLOAT",
+        "ALTER TABLE qa_runs ADD COLUMN IF NOT EXISTS logprob_margin        FLOAT",
+        "ALTER TABLE qa_runs ADD COLUMN IF NOT EXISTS nli_entailment        FLOAT",
+        "ALTER TABLE qa_runs ADD COLUMN IF NOT EXISTS fix_grounded          BOOLEAN",
+        "ALTER TABLE qa_runs ADD COLUMN IF NOT EXISTS dom_corroboration     FLOAT",
+        "ALTER TABLE qa_runs ADD COLUMN IF NOT EXISTS gate_route            VARCHAR",
+        "ALTER TABLE qa_runs ADD COLUMN IF NOT EXISTS gate_held_checks      TEXT",
+        "ALTER TABLE qa_runs ADD COLUMN IF NOT EXISTS suite_selection_scores TEXT",
+        "ALTER TABLE qa_runs ADD COLUMN IF NOT EXISTS dom_snapshot_gcs_path VARCHAR",
+        "ALTER TABLE qa_runs ADD COLUMN IF NOT EXISTS triage_ttft_ms        INTEGER",
+        "ALTER TABLE qa_runs ADD COLUMN IF NOT EXISTS triage_total_ms       INTEGER",
+        "ALTER TABLE qa_runs ADD COLUMN IF NOT EXISTS nli_latency_ms        INTEGER",
+        "ALTER TABLE qa_runs ADD COLUMN IF NOT EXISTS embedding_latency_ms  INTEGER",
+        "ALTER TABLE qa_runs ADD COLUMN IF NOT EXISTS triage_prompt         TEXT",
+        "ALTER TABLE qa_runs ADD COLUMN IF NOT EXISTS triage_response       TEXT",
+        "ALTER TABLE qa_runs ADD COLUMN IF NOT EXISTS triage_prompt_hash    VARCHAR",
+        # failure_patterns — expanded schema (rework v2)
+        "ALTER TABLE failure_patterns ADD COLUMN IF NOT EXISTS original_class     VARCHAR",
+        "ALTER TABLE failure_patterns ADD COLUMN IF NOT EXISTS verified_class     VARCHAR",
+        "ALTER TABLE failure_patterns ADD COLUMN IF NOT EXISTS evidence_json      TEXT DEFAULT '{}'",
+        "ALTER TABLE failure_patterns ADD COLUMN IF NOT EXISTS triage_prompt_hash VARCHAR",
+        "ALTER TABLE failure_patterns ADD COLUMN IF NOT EXISTS verified           BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE failure_patterns ADD COLUMN IF NOT EXISTS run_id             VARCHAR",
     ]
 
     async with _engine.begin() as conn:
@@ -289,6 +338,20 @@ async def create_run(run: RunRecord) -> None:
             report_text=getattr(run, "report_text", None),
             langfuse_trace_url=getattr(run, "langfuse_trace_url", None),
             data_json=json.dumps(d),
+            # Gate signals
+            p_class=run.p_class,
+            logprob_margin=run.logprob_margin,
+            nli_entailment=run.nli_entailment,
+            fix_grounded=run.fix_grounded,
+            dom_corroboration=run.dom_corroboration,
+            gate_route=run.gate_route,
+            gate_held_checks=json.dumps(run.gate_held_checks) if run.gate_held_checks else None,
+            suite_selection_scores=json.dumps(run.suite_selection_scores) if run.suite_selection_scores else None,
+            dom_snapshot_gcs_path=run.dom_snapshot_gcs_path,
+            triage_ttft_ms=run.triage_ttft_ms,
+            triage_total_ms=run.triage_total_ms,
+            nli_latency_ms=run.nli_latency_ms,
+            embedding_latency_ms=run.embedding_latency_ms,
         )
         s.add(rec)
         await s.commit()
@@ -311,6 +374,20 @@ async def update_run(run: RunRecord) -> None:
             rec.report_text = getattr(run, "report_text", None)
             rec.langfuse_trace_url = getattr(run, "langfuse_trace_url", None)
             rec.data_json = json.dumps(run.to_dict())
+            # Gate signals
+            rec.p_class = run.p_class
+            rec.logprob_margin = run.logprob_margin
+            rec.nli_entailment = run.nli_entailment
+            rec.fix_grounded = run.fix_grounded
+            rec.dom_corroboration = run.dom_corroboration
+            rec.gate_route = run.gate_route
+            rec.gate_held_checks = json.dumps(run.gate_held_checks) if run.gate_held_checks else None
+            rec.suite_selection_scores = json.dumps(run.suite_selection_scores) if run.suite_selection_scores else None
+            rec.dom_snapshot_gcs_path = run.dom_snapshot_gcs_path
+            rec.triage_ttft_ms = run.triage_ttft_ms
+            rec.triage_total_ms = run.triage_total_ms
+            rec.nli_latency_ms = run.nli_latency_ms
+            rec.embedding_latency_ms = run.embedding_latency_ms
             rec.updated_at = _utcnow()
             await s.commit()
 
@@ -722,3 +799,63 @@ async def count_consecutive_failures(test_name: str) -> int:
         """), {"pattern": f"%{test_name}%"})
         row = result.fetchone()
         return row[0] if row else 0
+
+
+async def get_test_history(test_name: str, days: int = 30) -> dict:
+    """
+    Return failure history for a specific test name from the last N days.
+    Queries qa_runs.data_json (JSON search) for runs containing this test name.
+    """
+    settings = get_settings()
+    pg = settings.is_postgres()
+    cutoff = _days_ago_sql(days, pg)
+    async with _session_factory() as s:
+        result = await s.execute(text(f"""
+            SELECT classification, status, created_at
+            FROM qa_runs
+            WHERE data_json LIKE :pattern
+              AND created_at > {cutoff}
+            ORDER BY created_at DESC
+            LIMIT 10
+        """), {"pattern": f"%{test_name}%"})
+        rows = result.fetchall()
+
+    if not rows:
+        return {}
+
+    last_classifications = [r[0] for r in rows if r[0]]
+    failed_count = sum(1 for r in rows if r[1] in ("failed", "complete") and r[0])
+    return {
+        "consecutive_failures": failed_count,
+        "last_classification": last_classifications[0] if last_classifications else None,
+        "last_confirmed_outcome": last_classifications[0] if last_classifications else None,
+        "total_runs_30d": len(rows),
+    }
+
+
+async def store_failure_pattern(
+    run_id: str,
+    original_class: str,
+    verified_class: str,
+    evidence: dict,
+    triage_prompt_hash: str | None = None,
+    verified: bool = False,
+) -> None:
+    """
+    Persist a run's outcome to failure_patterns for future calibration and RAG corpus.
+    Called after every auto-confirmed high-confidence run (human_override=False, gate passed).
+    """
+    import hashlib
+    pattern = DBFailurePattern(
+        id=str(uuid.uuid4()),
+        original_class=original_class,
+        verified_class=verified_class,
+        evidence_json=json.dumps(evidence),
+        triage_prompt_hash=triage_prompt_hash,
+        verified=verified,
+        run_id=run_id,
+    )
+    async with _session_factory() as s:
+        s.add(pattern)
+        await s.commit()
+    log.info("db.failure_pattern.stored", run_id=run_id, classification=original_class, verified=verified)

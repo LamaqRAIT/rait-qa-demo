@@ -61,6 +61,23 @@ class RunRecord:
     force_hitl: bool = False
     suite_selection_method: str = "fallback_all"
     report_text: str | None = None
+    # Confidence gate signals (set after gate evaluation)
+    p_class: float | None = None
+    logprob_margin: float | None = None
+    nli_entailment: float | None = None
+    fix_grounded: bool | None = None
+    dom_corroboration: float | None = None
+    gate_route: str | None = None               # "auto_fix" | "human_review"
+    gate_held_checks: list = field(default_factory=list)
+    # Suite selection scores from embedding similarity
+    suite_selection_scores: dict = field(default_factory=dict)
+    # GCS DOM snapshot path
+    dom_snapshot_gcs_path: str | None = None
+    # Latency breakdown (ms)
+    triage_ttft_ms: int | None = None
+    triage_total_ms: int | None = None
+    nli_latency_ms: int | None = None
+    embedding_latency_ms: int | None = None
     created_at: datetime = field(default_factory=datetime.utcnow)
     updated_at: datetime = field(default_factory=datetime.utcnow)
 
@@ -99,6 +116,19 @@ class RunRecord:
             "force_hitl": self.force_hitl,
             "suite_selection_method": self.suite_selection_method,
             "report_text": self.report_text,
+            "p_class": self.p_class,
+            "logprob_margin": self.logprob_margin,
+            "nli_entailment": self.nli_entailment,
+            "fix_grounded": self.fix_grounded,
+            "dom_corroboration": self.dom_corroboration,
+            "gate_route": self.gate_route,
+            "gate_held_checks": self.gate_held_checks,
+            "suite_selection_scores": self.suite_selection_scores,
+            "dom_snapshot_gcs_path": self.dom_snapshot_gcs_path,
+            "triage_ttft_ms": self.triage_ttft_ms,
+            "triage_total_ms": self.triage_total_ms,
+            "nli_latency_ms": self.nli_latency_ms,
+            "embedding_latency_ms": self.embedding_latency_ms,
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
         }
@@ -141,6 +171,19 @@ class RunRecord:
             force_hitl=d.get("force_hitl", False),
             suite_selection_method=d.get("suite_selection_method", "fallback_all"),
             report_text=d.get("report_text"),
+            p_class=d.get("p_class"),
+            logprob_margin=d.get("logprob_margin"),
+            nli_entailment=d.get("nli_entailment"),
+            fix_grounded=d.get("fix_grounded"),
+            dom_corroboration=d.get("dom_corroboration"),
+            gate_route=d.get("gate_route"),
+            gate_held_checks=d.get("gate_held_checks", []),
+            suite_selection_scores=d.get("suite_selection_scores", {}),
+            dom_snapshot_gcs_path=d.get("dom_snapshot_gcs_path"),
+            triage_ttft_ms=d.get("triage_ttft_ms"),
+            triage_total_ms=d.get("triage_total_ms"),
+            nli_latency_ms=d.get("nli_latency_ms"),
+            embedding_latency_ms=d.get("embedding_latency_ms"),
             created_at=datetime.fromisoformat(d["created_at"]) if d.get("created_at") else datetime.utcnow(),
             updated_at=datetime.fromisoformat(d["updated_at"]) if d.get("updated_at") else datetime.utcnow(),
         )

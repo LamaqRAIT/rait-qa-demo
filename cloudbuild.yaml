@@ -25,6 +25,17 @@ steps:
       - '--image=us-central1-docker.pkg.dev/rait-qa-agent/rait-qa-images/backend:$COMMIT_SHA'
       - '--region=us-central1'
       - '--project=rait-qa-agent'
+      - '--platform=managed'
+      - '--service-account=rait-qa-backend@rait-qa-agent.iam.gserviceaccount.com'
+      - '--min-instances=0'
+      - '--max-instances=5'
+      - '--cpu=2'
+      - '--memory=4Gi'
+      - '--timeout=600'
+      - '--concurrency=10'
+      - '--set-env-vars=ENVIRONMENT=production,GCS_DOM_SNAPSHOTS_BUCKET=rait-qa-dom-snapshots,GCS_MODEL_WEIGHTS_BUCKET=rait-qa-model-weights'
+      - '--update-secrets=DATABASE_URL=rait-qa-db-url:latest,GITHUB_TOKEN=rait-qa-github-token:latest,VLLM_BASE_URL=rait-qa-vllm-url:latest,SLACK_WEBHOOK_URL=rait-qa-slack-webhook:latest'
+      - '--add-cloudsql-instances=rait-qa-agent:us-central1:rait-qa-db'
       - '--quiet'
 
 images:

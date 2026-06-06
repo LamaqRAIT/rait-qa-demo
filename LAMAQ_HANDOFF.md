@@ -30,7 +30,7 @@ All in project `rait-qa-agent`:
 
 | Resource | Status | Details |
 |---|---|---|
-| Cloud Run CPU (`rait-qa-backend`) | ✅ Live | `https://rait-qa-backend-tqmp6uu44a-uc.a.run.app` |
+| Cloud Run CPU (`rait-qa-backend`) | ✅ Live | `https://rait-qa-backend-1097873447958.us-central1.run.app` |
 | Cloud SQL (`rait-qa-db`) | ✅ RUNNABLE | PostgreSQL 16, db-f1-micro, us-central1, DB: `rait_qa`, user: `rait_app` |
 | GCS bucket (`rait-qa-model-weights`) | ✅ | Model weights storage |
 | GCS bucket (`rait-qa-dom-snapshots`) | ✅ | Per-run DOM snapshots for replay/fine-tuning |
@@ -157,7 +157,7 @@ gcloud run jobs executions list --job=download-model-weights \
 
 **Backend health check:**
 ```
-https://rait-qa-backend-tqmp6uu44a-uc.a.run.app/health
+https://rait-qa-backend-1097873447958.us-central1.run.app/health
 ```
 
 ---

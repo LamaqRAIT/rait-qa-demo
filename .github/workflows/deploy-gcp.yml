@@ -1,0 +1,51 @@
+name: Deploy to GCP Cloud Run
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    name: Build and deploy backend
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: 'projects/1097873447958/locations/global/workloadIdentityPools/github-actions-pool/providers/github-provider'
+          service_account: 'rait-qa-cicd@rait-qa-agent.iam.gserviceaccount.com'
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            -f backend/docker/Dockerfile.cpu \
+            -t us-central1-docker.pkg.dev/rait-qa-agent/rait-qa-images/backend:${{ github.sha }} \
+            -t us-central1-docker.pkg.dev/rait-qa-agent/rait-qa-images/backend:latest \
+            backend
+
+      - name: Push Docker image
+        run: |
+          docker push us-central1-docker.pkg.dev/rait-qa-agent/rait-qa-images/backend:${{ github.sha }}
+          docker push us-central1-docker.pkg.dev/rait-qa-agent/rait-qa-images/backend:latest
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy rait-qa-backend \
+            --image=us-central1-docker.pkg.dev/rait-qa-agent/rait-qa-images/backend:${{ github.sha }} \
+            --region=us-central1 \
+            --project=rait-qa-agent \
+            --quiet

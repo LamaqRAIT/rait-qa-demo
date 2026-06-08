@@ -1,67 +1,88 @@
 """
 Canary node — two always-passing infra checks that gate the entire suite.
 If either fails, the run is immediately classified 'env' and no tests execute.
+
+Runs directly in FastAPI's event loop (no subprocess) to avoid gVisor
+seccomp restrictions that cause child Python processes to hang silently.
 """
 import asyncio
-import os
-import sys
 import structlog
+import httpx
 from app.config import get_settings
 
 log = structlog.get_logger()
 
 
-async def _stream_lines(stream, lines: list, label: str, run_id: str) -> None:
-    """Read subprocess output line by line; log each line immediately."""
-    while True:
-        raw = await stream.readline()
-        if not raw:
-            break
-        line = raw.decode("utf-8", errors="replace").rstrip()
-        lines.append(line)
-        log.debug(f"canary.{label}", run_id=run_id, line=line)
+async def _check_http(base_url: str) -> tuple[bool, str]:
+    """Verify /login.html returns HTTP 200."""
+    url = base_url + "/login.html"
+    try:
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            resp = await client.get(url)
+        if resp.status_code == 200:
+            return True, f"GET {url} → {resp.status_code}"
+        return False, f"GET {url} → {resp.status_code} (expected 200)"
+    except Exception as exc:
+        return False, f"GET {url} failed: {exc}"
+
+
+async def _check_dom(base_url: str) -> tuple[bool, str]:
+    """Verify #email input is present on the login page using async Playwright."""
+    url = base_url + "/login.html"
+    try:
+        from playwright.async_api import async_playwright
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--no-zygote",
+            ])
+            page = await browser.new_page()
+            await page.goto(url, timeout=20_000)
+            locator = page.locator("#email")
+            visible = await locator.is_visible()
+            await browser.close()
+        if visible:
+            return True, "#email is visible on login page"
+        return False, "#email not visible on login page"
+    except Exception as exc:
+        return False, f"DOM check failed: {exc}"
 
 
 async def run_canary(run_id: str) -> dict:
     settings = get_settings()
     base_url = settings.base_url.rstrip("/")
 
-    proc = await asyncio.create_subprocess_exec(
-        sys.executable, "-m", "pytest",
-        "tests/canary/",
-        "-v", "--tb=short",
-        "--timeout=60",
-        env={**os.environ, "BASE_URL": base_url},
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        start_new_session=True,  # put Chrome children in same session for clean kill
-    )
-
     lines: list[str] = []
-    try:
-        await asyncio.wait_for(
-            asyncio.gather(
-                _stream_lines(proc.stdout, lines, "stdout", run_id),
-                _stream_lines(proc.stderr, lines, "stderr", run_id),
-                proc.wait(),
-            ),
-            timeout=180,
-        )
-    except asyncio.TimeoutError:
-        # Kill the whole process group so Chrome children don't keep pipes open
-        try:
-            os.killpg(os.getpgid(proc.pid), 9)
-        except (ProcessLookupError, PermissionError):
-            proc.kill()
-        await asyncio.sleep(0.5)
-        log.error("canary.process_timeout", run_id=run_id, last_lines=lines[-10:])
-        output = "\n".join(lines) + "\n[TIMEOUT: canary killed after 180s]"
-        return {"passed": False, "output": output[:3000]}
 
-    passed = proc.returncode == 0
+    # Check 1: HTTP reachability (fast, no browser)
+    try:
+        http_ok, http_msg = await asyncio.wait_for(_check_http(base_url), timeout=35.0)
+    except asyncio.TimeoutError:
+        http_ok, http_msg = False, "HTTP check timed out after 35s"
+    lines.append(f"[http] {http_msg}")
+    log.info("canary.http", run_id=run_id, ok=http_ok, msg=http_msg)
+
+    if not http_ok:
+        log.warning("canary.failed", run_id=run_id, output="\n".join(lines))
+        return {"passed": False, "output": "\n".join(lines)}
+
+    # Check 2: DOM form element (browser)
+    try:
+        dom_ok, dom_msg = await asyncio.wait_for(_check_dom(base_url), timeout=60.0)
+    except asyncio.TimeoutError:
+        dom_ok, dom_msg = False, "DOM check timed out after 60s"
+    lines.append(f"[dom]  {dom_msg}")
+    log.info("canary.dom", run_id=run_id, ok=dom_ok, msg=dom_msg)
+
+    passed = http_ok and dom_ok
     output = "\n".join(lines)
-    if not passed:
-        log.warning("canary.failed", run_id=run_id, returncode=proc.returncode, output=output[:3000])
+
+    if passed:
+        log.info("canary.done", run_id=run_id, passed=True)
     else:
-        log.info("canary.done", run_id=run_id, passed=passed)
-    return {"passed": passed, "output": output[:2000]}
+        log.warning("canary.failed", run_id=run_id, output=output)
+
+    return {"passed": passed, "output": output}

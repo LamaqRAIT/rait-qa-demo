@@ -28,7 +28,7 @@ async def run_tests(run_id: str, selected_suites: list[str] | None = None) -> li
     else:
         test_paths = ["tests/suite/"]
 
-    env = {**os.environ, "BASE_URL": base_url}
+    env = {**os.environ, "BASE_URL": base_url, "PLAYWRIGHT_DRIVER_TIMEOUT": "120000"}
     proc = await asyncio.create_subprocess_exec(
         sys.executable, "-m", "pytest",
         *test_paths,

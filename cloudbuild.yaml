@@ -33,7 +33,7 @@ steps:
       - '--memory=8Gi'
       - '--timeout=600'
       - '--concurrency=10'
-      - '--set-env-vars=ENVIRONMENT=production,GCS_DOM_SNAPSHOTS_BUCKET=rait-qa-dom-snapshots,GCS_MODEL_WEIGHTS_BUCKET=rait-qa-model-weights,VLLM_MODEL=cyankiwi/gemma-4-26B-A4B-it-AWQ-4bit,HF_HUB_OFFLINE=1,TRANSFORMERS_OFFLINE=1'
+      - '--set-env-vars=ENVIRONMENT=production,GCS_DOM_SNAPSHOTS_BUCKET=rait-qa-dom-snapshots,GCS_MODEL_WEIGHTS_BUCKET=rait-qa-model-weights,VLLM_MODEL=cyankiwi/gemma-4-26B-A4B-it-AWQ-4bit,HF_HUB_OFFLINE=1,TRANSFORMERS_OFFLINE=1,PLAYWRIGHT_DRIVER_TIMEOUT=120000'
       - '--update-secrets=DATABASE_URL=rait-qa-db-url:latest,GITHUB_TOKEN=rait-qa-github-token:latest,VLLM_BASE_URL=rait-qa-vllm-url:latest,SLACK_WEBHOOK_URL=rait-qa-slack-webhook:latest'
       - '--add-cloudsql-instances=rait-qa-agent:us-central1:rait-qa-db'
       - '--execution-environment=gen2'

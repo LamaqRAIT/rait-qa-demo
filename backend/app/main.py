@@ -35,8 +35,17 @@ async def lifespan(app_instance: FastAPI):
     except Exception as exc:
         log.warning("telemetry.init_error", error=str(exc)[:100])
 
-    await db.init_db()
-    log.info("db.ready")
+    for _attempt in range(5):
+        try:
+            await db.init_db()
+            log.info("db.ready")
+            break
+        except Exception as exc:
+            if _attempt < 4:
+                log.warning("db.init_retry", attempt=_attempt, error=str(exc)[:200])
+                await asyncio.sleep(2 ** _attempt)
+            else:
+                log.error("db.init_failed", error=str(exc)[:200])
 
     # ── Build selector index from test files ───────────────────────────────────
     try:

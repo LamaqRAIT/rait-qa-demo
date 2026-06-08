@@ -10,6 +10,15 @@ BASE_URL = os.environ.get(
 
 
 @pytest.fixture(scope="session")
+def browser_type_launch_args(browser_type_launch_args):
+    # Required in Cloud Run: seccomp blocks Chromium sandbox, /dev/shm is tiny
+    return {
+        **browser_type_launch_args,
+        "args": ["--no-sandbox", "--disable-dev-shm-usage"],
+    }
+
+
+@pytest.fixture(scope="session")
 def base_url() -> str:
     return BASE_URL
 

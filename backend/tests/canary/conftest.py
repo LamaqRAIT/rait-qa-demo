@@ -11,10 +11,18 @@ BASE_URL = os.environ.get(
 
 @pytest.fixture(scope="session")
 def browser_type_launch_args(browser_type_launch_args):
-    # Required in Cloud Run: seccomp blocks Chromium sandbox, /dev/shm is tiny
+    # Cloud Run seccomp blocks user namespaces; disable all sandbox layers
+    # and GPU/zygote processes that require elevated kernel privileges
     return {
         **browser_type_launch_args,
-        "args": ["--no-sandbox", "--disable-dev-shm-usage"],
+        "args": [
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--no-zygote",
+            "--single-process",
+        ],
     }
 
 

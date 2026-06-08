@@ -49,7 +49,7 @@ async def run_tests(run_id: str, selected_suites: list[str] | None = None) -> li
         await warmup.wait()
         log.error("runner.warmup_timeout", run_id=run_id)
 
-    import os, signal as _signal
+    import signal as _signal
 
     proc = await asyncio.create_subprocess_exec(
         sys.executable, "-m", "pytest",

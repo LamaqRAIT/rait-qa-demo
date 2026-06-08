@@ -29,12 +29,32 @@ async def run_tests(run_id: str, selected_suites: list[str] | None = None) -> li
         test_paths = ["tests/suite/"]
 
     env = {**os.environ, "BASE_URL": base_url, "PLAYWRIGHT_DRIVER_TIMEOUT": "120000"}
+
+    # Pre-warm the Node.js Playwright driver: Cloud Run Gen2 lazily loads
+    # container image layers from GCS, so first access to the driver binary
+    # can take 60-180s.  Starting+stopping playwright here warms the OS page
+    # cache so the pytest session fixture starts in ~2s instead of >90s.
+    warmup = await asyncio.create_subprocess_exec(
+        sys.executable, "-c",
+        "from playwright.sync_api import sync_playwright; pw=sync_playwright().start(); pw.stop(); print('WARMUP_OK')",
+        env=env,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        wu_out, wu_err = await asyncio.wait_for(warmup.communicate(), timeout=200)
+        log.info("runner.warmup", run_id=run_id, ok=b"WARMUP_OK" in wu_out)
+    except asyncio.TimeoutError:
+        warmup.kill()
+        await warmup.wait()
+        log.error("runner.warmup_timeout", run_id=run_id)
+
     proc = await asyncio.create_subprocess_exec(
         sys.executable, "-m", "pytest",
         *test_paths,
         f"--junit-xml={RESULTS_PATH}",
         "-v", "--tb=short",
-        "--timeout=30",
+        "--timeout=180",
         "-p", "no:warnings",
         env=env,
         stdout=asyncio.subprocess.PIPE,

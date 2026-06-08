@@ -22,6 +22,8 @@ def browser_type_launch_args(browser_type_launch_args):
             "--disable-dev-shm-usage",
             "--disable-gpu",
             "--no-zygote",
+            "--no-proxy-server",            # prevent WPAD/proxy auto-detect hang in Cloud Run
+            "--disable-background-networking",  # suppress startup network calls to Google services
         ],
     }
 

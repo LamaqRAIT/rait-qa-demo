@@ -43,13 +43,13 @@ async def run_tests(run_id: str, selected_suites: list[str] | None = None) -> li
     try:
         stdout, stderr = await asyncio.wait_for(
             proc.communicate(),
-            timeout=200,
+            timeout=600,
         )
     except asyncio.TimeoutError:
         proc.kill()
         await proc.wait()
         log.error("runner.timeout", run_id=run_id)
-        return [{"test": "suite", "raw": "Test suite timed out after 120s", "selector": "", "expected": "", "actual": ""}]
+        return [{"test": "suite", "raw": "Test suite timed out after 600s", "selector": "", "expected": "", "actual": ""}]
     output = stdout.decode() + stderr.decode()
     if proc.returncode != 0:
         log.warning("runner.failures", run_id=run_id, returncode=proc.returncode, output=output[:2000])

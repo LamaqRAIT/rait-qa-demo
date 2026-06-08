@@ -2,10 +2,11 @@
 Canary node — two always-passing infra checks that gate the entire suite.
 If either fails, the run is immediately classified 'env' and no tests execute.
 
-Runs directly in FastAPI's event loop (no subprocess) to avoid gVisor
-seccomp restrictions that cause child Python processes to hang silently.
+Uses httpx + stdlib HTML parsing only — no browser, no subprocess — because
+Cloud Run (both gVisor and Gen2) has Chrome launch issues that cause hangs.
 """
 import asyncio
+from html.parser import HTMLParser
 import structlog
 import httpx
 from app.config import get_settings
@@ -13,76 +14,59 @@ from app.config import get_settings
 log = structlog.get_logger()
 
 
-async def _check_http(base_url: str) -> tuple[bool, str]:
-    """Verify /login.html returns HTTP 200."""
-    url = base_url + "/login.html"
-    try:
-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-            resp = await client.get(url)
-        if resp.status_code == 200:
-            return True, f"GET {url} → {resp.status_code}"
-        return False, f"GET {url} → {resp.status_code} (expected 200)"
-    except Exception as exc:
-        return False, f"GET {url} failed: {exc}"
+class _IdFinder(HTMLParser):
+    """Scan HTML for a tag whose id attribute matches a target."""
+    def __init__(self, target_id: str) -> None:
+        super().__init__()
+        self.found = False
+        self._target = target_id
 
-
-async def _check_dom(base_url: str) -> tuple[bool, str]:
-    """Verify #email input is present on the login page using async Playwright."""
-    url = base_url + "/login.html"
-    try:
-        from playwright.async_api import async_playwright
-        async with async_playwright() as pw:
-            browser = await pw.chromium.launch(args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-                "--no-zygote",
-            ])
-            page = await browser.new_page()
-            await page.goto(url, timeout=20_000)
-            locator = page.locator("#email")
-            visible = await locator.is_visible()
-            await browser.close()
-        if visible:
-            return True, "#email is visible on login page"
-        return False, "#email not visible on login page"
-    except Exception as exc:
-        return False, f"DOM check failed: {exc}"
+    def handle_starttag(self, tag: str, attrs: list) -> None:
+        for name, value in attrs:
+            if name == "id" and value == self._target:
+                self.found = True
 
 
 async def run_canary(run_id: str) -> dict:
     settings = get_settings()
     base_url = settings.base_url.rstrip("/")
-
+    url = base_url + "/login.html"
     lines: list[str] = []
 
-    # Check 1: HTTP reachability (fast, no browser)
     try:
-        http_ok, http_msg = await asyncio.wait_for(_check_http(base_url), timeout=35.0)
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            resp = await asyncio.wait_for(client.get(url), timeout=30.0)
     except asyncio.TimeoutError:
-        http_ok, http_msg = False, "HTTP check timed out after 35s"
-    lines.append(f"[http] {http_msg}")
-    log.info("canary.http", run_id=run_id, ok=http_ok, msg=http_msg)
-
-    if not http_ok:
+        msg = f"GET {url} timed out after 30s"
+        lines.append(f"[http] FAIL: {msg}")
+        log.warning("canary.failed", run_id=run_id, output="\n".join(lines))
+        return {"passed": False, "output": "\n".join(lines)}
+    except Exception as exc:
+        msg = f"GET {url} error: {exc}"
+        lines.append(f"[http] FAIL: {msg}")
         log.warning("canary.failed", run_id=run_id, output="\n".join(lines))
         return {"passed": False, "output": "\n".join(lines)}
 
-    # Check 2: DOM form element (browser)
-    try:
-        dom_ok, dom_msg = await asyncio.wait_for(_check_dom(base_url), timeout=60.0)
-    except asyncio.TimeoutError:
-        dom_ok, dom_msg = False, "DOM check timed out after 60s"
-    lines.append(f"[dom]  {dom_msg}")
-    log.info("canary.dom", run_id=run_id, ok=dom_ok, msg=dom_msg)
+    # Check 1: HTTP 200
+    if resp.status_code != 200:
+        msg = f"GET {url} → {resp.status_code} (expected 200)"
+        lines.append(f"[http] FAIL: {msg}")
+        log.warning("canary.failed", run_id=run_id, output="\n".join(lines))
+        return {"passed": False, "output": "\n".join(lines)}
 
-    passed = http_ok and dom_ok
-    output = "\n".join(lines)
+    lines.append(f"[http] PASS: GET {url} → {resp.status_code}")
+    log.info("canary.http", run_id=run_id, ok=True, msg=lines[-1])
 
-    if passed:
-        log.info("canary.done", run_id=run_id, passed=True)
+    # Check 2: #email input present in HTML (no browser needed)
+    finder = _IdFinder("email")
+    finder.feed(resp.text)
+    if finder.found:
+        lines.append("[dom]  PASS: #email input found in HTML")
+        log.info("canary.dom", run_id=run_id, ok=True, msg=lines[-1])
     else:
-        log.warning("canary.failed", run_id=run_id, output=output)
+        lines.append("[dom]  FAIL: #email input not found in login page HTML")
+        log.warning("canary.failed", run_id=run_id, output="\n".join(lines))
+        return {"passed": False, "output": "\n".join(lines)}
 
-    return {"passed": passed, "output": output}
+    log.info("canary.done", run_id=run_id, passed=True)
+    return {"passed": True, "output": "\n".join(lines)}

@@ -49,6 +49,8 @@ async def run_tests(run_id: str, selected_suites: list[str] | None = None) -> li
         await warmup.wait()
         log.error("runner.warmup_timeout", run_id=run_id)
 
+    import os, signal as _signal
+
     proc = await asyncio.create_subprocess_exec(
         sys.executable, "-m", "pytest",
         *test_paths,
@@ -59,18 +61,42 @@ async def run_tests(run_id: str, selected_suites: list[str] | None = None) -> li
         env=env,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,  # own process group so we can kill Chrome children
     )
+
+    # Stream output so diagnostics are available even when we timeout+kill.
+    chunks: list[bytes] = []
+
+    async def _drain(stream: asyncio.StreamReader) -> None:
+        while True:
+            line = await stream.readline()
+            if not line:
+                break
+            chunks.append(line)
+
+    timed_out = False
     try:
-        stdout, stderr = await asyncio.wait_for(
-            proc.communicate(),
-            timeout=600,
+        await asyncio.wait_for(
+            asyncio.gather(_drain(proc.stdout), _drain(proc.stderr), proc.wait()),
+            timeout=900,
         )
     except asyncio.TimeoutError:
-        proc.kill()
+        timed_out = True
+        try:
+            os.killpg(os.getpgid(proc.pid), _signal.SIGKILL)
+        except Exception:
+            proc.kill()
         await proc.wait()
-        log.error("runner.timeout", run_id=run_id)
-        return [{"test": "suite", "raw": "Test suite timed out after 600s", "selector": "", "expected": "", "actual": ""}]
-    output = stdout.decode() + stderr.decode()
+
+    output = b"".join(chunks).decode(errors="replace")
+
+    if timed_out:
+        log.error("runner.timeout", run_id=run_id, last_output=output[-3000:])
+        result = _parse_junit(RESULTS_PATH, output)
+        if result:
+            return result
+        return [{"test": "suite", "raw": f"Timed out after 900s. Last pytest output:\n{output[-1500:]}", "selector": "", "expected": "", "actual": ""}]
+
     if proc.returncode != 0:
         log.warning("runner.failures", run_id=run_id, returncode=proc.returncode, output=output[:2000])
     log.info("runner.done", run_id=run_id, returncode=proc.returncode)

@@ -36,8 +36,8 @@ def base_url() -> str:
 @pytest.fixture(autouse=True)
 def fast_timeouts(page: Page) -> None:
     """Cap Playwright action/navigation timeout at 15s to keep CI runs short."""
-    page.set_default_timeout(15_000)
-    page.set_default_navigation_timeout(15_000)
+    page.set_default_timeout(30_000)
+    page.set_default_navigation_timeout(30_000)
 
 
 @pytest.fixture

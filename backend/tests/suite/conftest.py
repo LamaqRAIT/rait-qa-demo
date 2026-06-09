@@ -1,6 +1,6 @@
 import os
 import pytest
-from playwright.sync_api import Page, BrowserContext
+from playwright.sync_api import Page, BrowserContext, expect
 
 # Base URL of the demo site. Override with BASE_URL env var.
 BASE_URL = os.environ.get(
@@ -38,9 +38,11 @@ def base_url() -> str:
 
 @pytest.fixture(autouse=True)
 def fast_timeouts(page: Page) -> None:
-    """Cap Playwright action/navigation timeout at 15s to keep CI runs short."""
     page.set_default_timeout(30_000)
     page.set_default_navigation_timeout(30_000)
+    # pytest-playwright uses a separate default (5000ms) for expect assertions;
+    # page.set_default_timeout alone does not override it.
+    expect.set_options(timeout=30_000)
 
 
 @pytest.fixture

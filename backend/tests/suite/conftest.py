@@ -24,6 +24,9 @@ def browser_type_launch_args(browser_type_launch_args):
             "--no-zygote",
             "--no-proxy-server",            # prevent WPAD/proxy auto-detect hang in Cloud Run
             "--disable-background-networking",  # suppress startup network calls to Google services
+            # Google Fonts DNS → loopback: font requests fail-fast instead of hanging 30s+.
+            # Pages render with fallback fonts; load event fires in <1s from Cloud Run.
+            "--host-resolver-rules=MAP fonts.googleapis.com 127.0.0.1,MAP fonts.gstatic.com 127.0.0.1",
         ],
     }
 

@@ -40,9 +40,53 @@ steps:
       - '--cpu-boost'
       - '--quiet'
 
+  # ── agent-ui (Next.js frontend) ───────────────────────────────────────────────
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-f'
+      - 'agent-ui/Dockerfile'
+      - '--build-arg'
+      - 'NEXT_PUBLIC_API_URL=https://rait-qa-backend-tqmp6uu44a-uc.a.run.app'
+      - '-t'
+      - 'us-central1-docker.pkg.dev/rait-qa-agent/rait-qa-images/agent-ui:$COMMIT_SHA'
+      - '-t'
+      - 'us-central1-docker.pkg.dev/rait-qa-agent/rait-qa-images/agent-ui:latest'
+      - 'agent-ui'
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'us-central1-docker.pkg.dev/rait-qa-agent/rait-qa-images/agent-ui:$COMMIT_SHA']
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'us-central1-docker.pkg.dev/rait-qa-agent/rait-qa-images/agent-ui:latest']
+
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'rait-qa-frontend'
+      - '--image=us-central1-docker.pkg.dev/rait-qa-agent/rait-qa-images/agent-ui:$COMMIT_SHA'
+      - '--region=us-central1'
+      - '--project=rait-qa-agent'
+      - '--platform=managed'
+      - '--service-account=rait-qa-backend@rait-qa-agent.iam.gserviceaccount.com'
+      - '--allow-unauthenticated'
+      - '--min-instances=0'
+      - '--max-instances=3'
+      - '--cpu=1'
+      - '--memory=512Mi'
+      - '--port=3000'
+      - '--timeout=60'
+      - '--concurrency=80'
+      - '--execution-environment=gen2'
+      - '--quiet'
+
 images:
   - 'us-central1-docker.pkg.dev/rait-qa-agent/rait-qa-images/backend:$COMMIT_SHA'
   - 'us-central1-docker.pkg.dev/rait-qa-agent/rait-qa-images/backend:latest'
+  - 'us-central1-docker.pkg.dev/rait-qa-agent/rait-qa-images/agent-ui:$COMMIT_SHA'
+  - 'us-central1-docker.pkg.dev/rait-qa-agent/rait-qa-images/agent-ui:latest'
 
 options:
   machineType: 'E2_HIGHCPU_8'

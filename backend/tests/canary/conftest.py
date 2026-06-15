@@ -10,6 +10,23 @@ BASE_URL = os.environ.get(
 
 
 @pytest.fixture(scope="session")
+def browser_type_launch_args(browser_type_launch_args):
+    # Cloud Run seccomp blocks user namespaces; disable all sandbox layers
+    # and GPU/zygote processes that require elevated kernel privileges.
+    # --single-process removed: causes silent hangs in Linux containers.
+    return {
+        **browser_type_launch_args,
+        "args": [
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--no-zygote",
+        ],
+    }
+
+
+@pytest.fixture(scope="session")
 def base_url() -> str:
     return BASE_URL
 

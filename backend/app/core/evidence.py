@@ -1,6 +1,7 @@
 """
 Evidence bundle builder.
 Aggregates failures + DOM report + recent commits + test history before any LLM call.
+test_history is now populated from the DB (last 30 days), not from a simple counter.
 """
 import structlog
 from app.config import get_settings

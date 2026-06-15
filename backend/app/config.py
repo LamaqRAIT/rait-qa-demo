@@ -6,9 +6,8 @@ import re
 
 def _fix_db_url(url: str) -> str:
     """
-    Railway injects a bare `postgresql://...` URL.
+    Railway/GCP injects a bare `postgresql://...` URL.
     SQLAlchemy async requires `postgresql+asyncpg://...`.
-    This function patches it transparently.
     """
     if url.startswith("postgresql://") or url.startswith("postgres://"):
         url = re.sub(r"^postgres(?:ql)?://", "postgresql+asyncpg://", url)
@@ -26,15 +25,25 @@ class Settings(BaseSettings):
     groq_api_key: str = ""
     google_api_key: str = ""
 
-    # Database
+    # ── Database ───────────────────────────────────────────────────────────────
     database_url: str = "sqlite+aiosqlite:///./demo.db"
 
-    # Demo site
+    # ── GCS storage ───────────────────────────────────────────────────────────
+    gcs_model_weights_bucket: str = "rait-qa-model-weights"
+    gcs_dom_snapshots_bucket: str = "rait-qa-dom-snapshots"
+
+    # ── OTel Collector (sidecar) ───────────────────────────────────────────────
+    # Set to http://localhost:4317 in Cloud Run (sidecar on same container)
+    # Leave empty to disable telemetry (local dev default)
+    otel_exporter_otlp_endpoint: str = ""
+
+    # ── Demo site ──────────────────────────────────────────────────────────────
     base_url: str = "https://lamaqrait.github.io/rait-qa-demo"
     demo_host_url: str = ""  # when set, use GCP demo server instead of GitHub API
     playwright_timeout: int = 20000
 
-    # Pipeline thresholds
+    # ── Pipeline ───────────────────────────────────────────────────────────────
+    # auto_fix_threshold kept for circuit_breaker.py and metrics API (deprecated — gate controls routing)
     auto_fix_threshold: float = 0.80
     max_run_cost_usd: float = 0.50
 
@@ -71,36 +80,33 @@ class Settings(BaseSettings):
             self.github_token = self.github_pat
         return self
 
-    # Langfuse — accept both naming conventions (LANGFUSE_HOST and LANGFUSE_BASE_URL)
-    langfuse_public_key: str = ""
-    langfuse_secret_key: str = ""
-    langfuse_host: str = "https://cloud.langfuse.com"
-    langfuse_base_url: str = ""          # alias, takes precedence if set
+    @model_validator(mode="after")
+    def _propagate_otel_endpoint(self) -> "Settings":
+        """Mirror otel_exporter_otlp_endpoint → OTEL_EXPORTER_OTLP_ENDPOINT env var."""
+        import os
+        if self.otel_exporter_otlp_endpoint and not os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"):
+            os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] = self.otel_exporter_otlp_endpoint
+        return self
 
-    # JWT auth
+    # ── JWT auth ───────────────────────────────────────────────────────────────
     jwt_secret: str = "changeme-dev-only-do-not-use-in-prod"
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 60
     refresh_token_expire_days: int = 7
 
-    # Integrations
+    # ── Integrations ───────────────────────────────────────────────────────────
     slack_webhook_url: str = ""
     jira_base_url: str = ""
     jira_email: str = ""
     jira_api_token: str = ""
     jira_project_key: str = "RAIT"
 
-    # CORS / hosting
+    # ── CORS / hosting ─────────────────────────────────────────────────────────
     backend_url: str = ""
     agent_ui_url: str = ""
     cors_origins: list[str] = ["http://localhost:3000", "http://localhost:3001"]
 
-    def get_langfuse_host(self) -> str:
-        """Return the effective Langfuse host (prefer LANGFUSE_BASE_URL alias)."""
-        return self.langfuse_base_url or self.langfuse_host
-
     def get_db_url(self) -> str:
-        """Return the database URL with asyncpg dialect for Postgres."""
         return _fix_db_url(self.database_url)
 
     def is_postgres(self) -> bool:
@@ -111,12 +117,12 @@ class Settings(BaseSettings):
         for extra in [self.agent_ui_url, self.backend_url]:
             if extra and extra not in origins:
                 origins.append(extra)
-        # Always allow Railway deploy domains
         origins.append("https://*.up.railway.app")
+        origins.append("https://*.run.app")
         return origins
 
     class Config:
-        env_file = ("../.env", ".env")  # try repo-root first, then backend/
+        env_file = ("../.env", ".env")
         env_file_encoding = "utf-8"
         extra = "ignore"
 

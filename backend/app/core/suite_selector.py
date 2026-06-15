@@ -22,6 +22,7 @@ from app.config import get_settings
 log = structlog.get_logger()
 
 SUITE_DIR = "tests/suite"
+EMBEDDING_THRESHOLD = 0.35   # minimum cosine similarity to include a suite
 
 
 def _all_suite_files() -> list[str]:
@@ -29,8 +30,8 @@ def _all_suite_files() -> list[str]:
     return [os.path.basename(f) for f in glob.glob(pattern)]
 
 
-def _get_all_docstrings() -> dict[str, str]:
-    """Returns {filename: first_docstring_or_comment}."""
+def _get_all_intents() -> dict[str, str]:
+    """Returns {filename: intent_text} from # INTENT: comments in each test file."""
     result = {}
     for fp in glob.glob(os.path.join(SUITE_DIR, "test_*.py")):
         fname = os.path.basename(fp)
@@ -47,7 +48,7 @@ def _get_all_docstrings() -> dict[str, str]:
                         break
         except Exception:
             pass
-        result[fname] = intent
+        result[fname] = intent or fname.replace("test_", "").replace(".py", "").replace("_", " ")
     return result
 
 
@@ -77,7 +78,7 @@ def _fetch_changed_files(commit_sha: str) -> list[dict]:
 async def _deterministic_select(changed_files: list[dict]) -> tuple[list[str], float]:
     """
     Returns (matched_test_files, max_confidence).
-    Confidence: 1.0 if page_path exact match, 0.8 if selector text found in diff patch.
+    Confidence: 0.90 if page_path exact match, 0.80 if selector text found in diff.
     """
     if not changed_files:
         return [], 0.0
@@ -87,21 +88,16 @@ async def _deterministic_select(changed_files: list[dict]) -> tuple[list[str], f
     for cf in changed_files:
         fname = cf["filename"]
         patch = cf.get("patch", "")
-        # Extract filename from path: demo-site/checkout.html → checkout.html
         basename = os.path.basename(fname)
 
-        # Query by page path
         if basename.endswith((".html", ".css", ".js")):
             rows = await db.query_selector_index_by_path(basename)
             for row in rows:
                 tf = row["test_file"]
                 matched[tf] = max(matched.get(tf, 0), 0.90)
 
-        # Check if patch contains indexed selector strings (e.g. renamed CSS class)
         if patch:
-            # Extract removed lines from diff (-lines)
             removed = " ".join(line[1:] for line in patch.splitlines() if line.startswith("-"))
-            # Get all words from removed lines and check against selector index
             for word in set(removed.split()):
                 if len(word) > 3:
                     rows = await db.query_selector_index_by_value(word)
@@ -212,22 +208,21 @@ async def _embedding_select(
 async def select_suites(commit_sha: str, run_id: str = "") -> tuple[list[str], str, bool]:
     """
     Main entry point.
-    Returns (suites_to_run, method, force_hitl).
-    method = "deterministic" | "llm_fallback" | "fallback_all"
+    Returns (suites_to_run, method, force_hitl, embedding_scores).
+    method = "deterministic" | "embedding" | "fallback_all"
+    embedding_scores = {suite: cosine_score} — empty for non-embedding paths.
     """
     all_suites = _all_suite_files()
     if not all_suites:
-        return [], "fallback_all", False
+        return [], "fallback_all", False, {}
 
-    # Always run all if no commit info
     if commit_sha in ("manual", "inject-drift", "scheduled", ""):
-        return all_suites, "fallback_all", False
+        return all_suites, "fallback_all", False, {}
 
     changed_files = _fetch_changed_files(commit_sha)
-
     if not changed_files:
         log.info("suite_selector.no_changes", sha=commit_sha[:7])
-        return all_suites, "fallback_all", False
+        return all_suites, "fallback_all", False, {}
 
     settings = get_settings()
     det_conf_floor = settings.suite_selector_det_confidence
@@ -236,6 +231,9 @@ async def select_suites(commit_sha: str, run_id: str = "") -> tuple[list[str], s
 
     # Step 1: deterministic
     matched, confidence = await _deterministic_select(changed_files)
+    if matched and confidence >= 0.70 and len(matched) <= len(all_suites) * 0.5:
+        log.info("suite_selector.deterministic", suites=matched, confidence=confidence)
+        return matched, "deterministic", False, {}
 
     if matched and confidence >= det_conf_floor:
         # Check if we're selecting > max_fraction of all suites (ambiguous → LLM)
@@ -254,5 +252,5 @@ async def select_suites(commit_sha: str, run_id: str = "") -> tuple[list[str], s
     except Exception as exc:
         log.error("suite_selector.embedding_error", error=str(exc)[:100])
 
-    # Step 3: full suite fallback
-    return all_suites, "fallback_all", False
+    # Tier 3: full suite fallback
+    return all_suites, "fallback_all", False, {}

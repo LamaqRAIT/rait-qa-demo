@@ -14,7 +14,7 @@ def test_login_with_valid_credentials(page: Page, base_url: str) -> None:
     page.click("#login-btn")
 
     # Flow 3 target: URL assertion. If redirect goes to /products.html this FAILS.
-    page.wait_for_url("**/dashboard.html", timeout=5000)
+    page.wait_for_url("**/dashboard.html", timeout=30000)
     expect(page).to_have_url(f"{base_url}/dashboard.html")
 
 

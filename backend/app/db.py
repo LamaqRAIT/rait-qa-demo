@@ -23,7 +23,7 @@ class DBRunRecord(Base):
     id                      = Column(String, primary_key=True)
     status                  = Column(String, default="planning")
     classification          = Column(String, nullable=True)
-    confidence              = Column(Float, nullable=True)
+    confidence              = Column(Float, nullable=True)   # deprecated; kept for backward compat
     cost_usd                = Column(Float, default=0.0)
     input_tokens            = Column(Integer, default=0)
     output_tokens           = Column(Integer, default=0)
@@ -39,6 +39,27 @@ class DBRunRecord(Base):
     triage_response         = Column(Text, nullable=True)
     triage_prompt_hash      = Column(String(64), nullable=True)
     data_json               = Column(Text, default="{}")
+    # Confidence gate signals (rework v2)
+    p_class                 = Column(Float, nullable=True)
+    logprob_margin          = Column(Float, nullable=True)
+    nli_entailment          = Column(Float, nullable=True)
+    fix_grounded            = Column(Boolean, nullable=True)
+    dom_corroboration       = Column(Float, nullable=True)
+    gate_route              = Column(String, nullable=True)   # auto_fix | human_review
+    gate_held_checks        = Column(Text, nullable=True)     # JSON list of failed signal names
+    # Suite embedding scores
+    suite_selection_scores  = Column(Text, nullable=True)     # JSON {suite: cosine_score}
+    # GCS DOM snapshot
+    dom_snapshot_gcs_path   = Column(String, nullable=True)
+    # Latency breakdown (ms)
+    triage_ttft_ms          = Column(Integer, nullable=True)
+    triage_total_ms         = Column(Integer, nullable=True)
+    nli_latency_ms          = Column(Integer, nullable=True)
+    embedding_latency_ms    = Column(Integer, nullable=True)
+    # Triage prompt/response for replay
+    triage_prompt           = Column(Text, nullable=True)
+    triage_response         = Column(Text, nullable=True)
+    triage_prompt_hash      = Column(String, nullable=True)
     created_at              = Column(DateTime, default=datetime.utcnow)
     updated_at              = Column(DateTime, default=datetime.utcnow)
     # Rework: five-signal confidence gate (queryable columns — replaces model-generated confidence)
@@ -357,6 +378,20 @@ async def create_run(run: RunRecord) -> None:
             report_text=getattr(run, "report_text", None),
             langfuse_trace_url=getattr(run, "langfuse_trace_url", None),
             data_json=json.dumps(d),
+            # Gate signals
+            p_class=run.p_class,
+            logprob_margin=run.logprob_margin,
+            nli_entailment=run.nli_entailment,
+            fix_grounded=run.fix_grounded,
+            dom_corroboration=run.dom_corroboration,
+            gate_route=run.gate_route,
+            gate_held_checks=json.dumps(run.gate_held_checks) if run.gate_held_checks else None,
+            suite_selection_scores=json.dumps(run.suite_selection_scores) if run.suite_selection_scores else None,
+            dom_snapshot_gcs_path=run.dom_snapshot_gcs_path,
+            triage_ttft_ms=run.triage_ttft_ms,
+            triage_total_ms=run.triage_total_ms,
+            nli_latency_ms=run.nli_latency_ms,
+            embedding_latency_ms=run.embedding_latency_ms,
         )
         s.add(rec)
         await s.commit()
@@ -379,6 +414,20 @@ async def update_run(run: RunRecord) -> None:
             rec.report_text = getattr(run, "report_text", None)
             rec.langfuse_trace_url = getattr(run, "langfuse_trace_url", None)
             rec.data_json = json.dumps(run.to_dict())
+            # Gate signals
+            rec.p_class = run.p_class
+            rec.logprob_margin = run.logprob_margin
+            rec.nli_entailment = run.nli_entailment
+            rec.fix_grounded = run.fix_grounded
+            rec.dom_corroboration = run.dom_corroboration
+            rec.gate_route = run.gate_route
+            rec.gate_held_checks = json.dumps(run.gate_held_checks) if run.gate_held_checks else None
+            rec.suite_selection_scores = json.dumps(run.suite_selection_scores) if run.suite_selection_scores else None
+            rec.dom_snapshot_gcs_path = run.dom_snapshot_gcs_path
+            rec.triage_ttft_ms = run.triage_ttft_ms
+            rec.triage_total_ms = run.triage_total_ms
+            rec.nli_latency_ms = run.nli_latency_ms
+            rec.embedding_latency_ms = run.embedding_latency_ms
             rec.updated_at = _utcnow()
             await s.commit()
 

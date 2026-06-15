@@ -1,0 +1,56 @@
+# OTel Collector sidecar configuration
+# Receives OTLP (gRPC port 4317) from FastAPI + vLLM
+# Exports to: Cloud Trace + Cloud Monitoring + Cloud Logging
+# Runs as a sidecar container alongside rait-qa-backend on Cloud Run
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: "0.0.0.0:4317"
+      http:
+        endpoint: "0.0.0.0:4318"
+
+processors:
+  batch:
+    timeout: 5s
+    send_batch_size: 512
+  resource:
+    attributes:
+      - key: gcp.project_id
+        value: "rait-qa-agent"
+        action: upsert
+
+exporters:
+  # Cloud Trace — distributed traces
+  googlecloud/trace:
+    project: rait-qa-agent
+    log_name: "rait-qa-traces"
+
+  # Cloud Monitoring — metrics (vLLM Prometheus metrics forwarded here)
+  googlecloud/monitoring:
+    project: rait-qa-agent
+
+  # Cloud Logging — structured logs correlated to trace IDs
+  googlecloud/logging:
+    project: rait-qa-agent
+    log_name: "rait-qa-backend"
+
+  # Debug exporter (disable in production)
+  logging:
+    verbosity: basic
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch, resource]
+      exporters: [googlecloud/trace]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [googlecloud/monitoring]
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [googlecloud/logging]

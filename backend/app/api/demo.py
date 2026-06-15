@@ -232,6 +232,11 @@ async def _inject_and_run(run_id: str, flow: str) -> None:
         await db.update_run(run)
         return
 
+    deployed = await _wait_for_pages_deployment(sha)
+    if not deployed:
+        log.warning("demo.pages_not_deployed", run_id=run_id, sha=sha[:7])
+        # proceed anyway — tests will reveal if drift is live
+
     await run_pipeline(run_id)
 
     await _schedule_revert(flow)

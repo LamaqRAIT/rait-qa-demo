@@ -552,6 +552,46 @@ async def _parse_and_validate(
     result = _try_parse(retry_raw) if retry_raw else None
     return result, retry_raw or raw
 
+    # Evidence text for NLI (short summary from DOM + commit signals)
+    evidence_text = _build_evidence_text(failures, dom_report, evidence)
+
+    return (
+        TriageResult(
+            classification=classification,
+            confidence=p_class or 0.0,   # kept for backward compat with UI
+            evidence=evidence_text,
+            proposed_fix=proposed_fix,
+        ),
+        None,           # trace_url — OTel handles this
+        total_in_tok,
+        total_out_tok,
+        0.0,            # cost_usd — self-hosted, no per-token billing
+        p_class,
+        logprob_margin,
+        ttft_ms,
+        triage_total_ms,
+    )
+
+
+def _build_evidence_text(failures: list[dict], dom_report: dict, evidence: dict) -> str:
+    """Build a short evidence summary string for NLI and DB storage."""
+    parts = []
+    if failures:
+        parts.append(f"{len(failures)} test(s) failed")
+        selectors = [f.get("selector") for f in failures if f.get("selector")]
+        if selectors:
+            parts.append(f"selector(s): {', '.join(selectors[:2])}")
+    candidates = dom_report.get("changed_selectors", [])
+    if candidates:
+        best = max(candidates, key=lambda c: c.get("confidence", 0))
+        parts.append(f"DOM candidate '{best.get('found', '')}' (conf {best.get('confidence', 0):.2f})")
+    commits = evidence.get("recent_commits", [])
+    if commits:
+        parts.append(f"recent commit: '{commits[0].get('message', '')[:60]}'")
+    return ". ".join(parts) or "No evidence available."
+
+
+# ── Deterministic fallback (unchanged from original, no LLM) ─────────────────
 
 def _infer_test_file(test_name: str) -> str:
     t = test_name.lower()
@@ -587,17 +627,12 @@ def _deterministic_triage(
         r'\b(?:rename|refactor|class|selector|copy|text|btn|css|label|aria)\b',
         _re.IGNORECASE,
     )
-    commit_signals = []
-    for commit in recent_commits:
-        msg = commit.get("message", "").lower()
-        if _RENAME_KEYWORDS.search(msg):
-            commit_signals.append(msg)
+    commit_signals = [c.get("message", "") for c in recent_commits if _RENAME_KEYWORDS.search(c.get("message", ""))]
 
     url_failures = [f for f in failures if
         "url" in (f.get("raw", "") + f.get("selector", "")).lower()
         or "redirect" in f.get("raw", "").lower()
         or "wait_for_url" in f.get("raw", "").lower()
-        or ("login" in f.get("test", "").lower() and "credential" in f.get("test", "").lower())
         or "to_have_url" in f.get("raw", "").lower()
     ]
 
@@ -642,16 +677,15 @@ def _deterministic_triage(
             ),
             None, 0, 0, 0.0,
         )
+        return result, None, 0, 0, 0.0, None, None, None, None
 
     elif url_failures:
         url_bug_confidence = 0.75
-        intent_evidence = ""
         if test_intents:
             for item in test_intents:
                 ti = (item.get("test_intent") or "").lower()
-                if any(kw in ti for kw in ("/dashboard", "/home", "/products", "destination", "redirect", "not any other")):
+                if any(kw in ti for kw in ("/dashboard", "/home", "/products", "destination", "redirect")):
                     url_bug_confidence = 0.88
-                    intent_evidence = f" Intent confirms required destination: '{item.get('test_intent', '')}'"
                     break
         return (
             TriageResult(
@@ -661,6 +695,7 @@ def _deterministic_triage(
             ),
             None, 0, 0, 0.0,
         )
+        return result, None, 0, 0, 0.0, None, None, None, None
 
     else:
         return (
@@ -671,3 +706,4 @@ def _deterministic_triage(
             ),
             None, 0, 0, 0.0,
         )
+        return result, None, 0, 0, 0.0, None, None, None, None

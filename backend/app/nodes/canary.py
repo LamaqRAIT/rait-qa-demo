@@ -10,6 +10,7 @@ import asyncio
 import os
 import sys
 import structlog
+import httpx
 from app.config import get_settings
 
 log = structlog.get_logger()

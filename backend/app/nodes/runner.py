@@ -28,29 +28,75 @@ async def run_tests(run_id: str, selected_suites: list[str] | None = None) -> li
     else:
         test_paths = ["tests/suite/"]
 
-    env = {**os.environ, "BASE_URL": base_url}
-    proc = await asyncio.create_subprocess_exec(
-        sys.executable, "-m", "pytest",
-        *test_paths,
-        f"--junit-xml={RESULTS_PATH}",
-        "-v", "--tb=short",
-        "--timeout=30",
-        "-p", "no:warnings",
+    env = {**os.environ, "BASE_URL": base_url, "PLAYWRIGHT_DRIVER_TIMEOUT": "120000"}
+
+    # Pre-warm the Node.js Playwright driver: Cloud Run Gen2 lazily loads
+    # container image layers from GCS, so first access to the driver binary
+    # can take 60-180s.  Starting+stopping playwright here warms the OS page
+    # cache so the pytest session fixture starts in ~2s instead of >90s.
+    warmup = await asyncio.create_subprocess_exec(
+        sys.executable, "-c",
+        "from playwright.sync_api import sync_playwright; pw=sync_playwright().start(); pw.stop(); print('WARMUP_OK')",
         env=env,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
     try:
-        stdout, stderr = await asyncio.wait_for(
-            proc.communicate(),
-            timeout=200,
+        wu_out, wu_err = await asyncio.wait_for(warmup.communicate(), timeout=200)
+        log.info("runner.warmup", run_id=run_id, ok=b"WARMUP_OK" in wu_out)
+    except asyncio.TimeoutError:
+        warmup.kill()
+        await warmup.wait()
+        log.error("runner.warmup_timeout", run_id=run_id)
+
+    import signal as _signal
+
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable, "-m", "pytest",
+        *test_paths,
+        f"--junit-xml={RESULTS_PATH}",
+        "-v", "--tb=short",
+        "--timeout=180",
+        "-p", "no:warnings",
+        env=env,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,  # own process group so we can kill Chrome children
+    )
+
+    # Stream output so diagnostics are available even when we timeout+kill.
+    chunks: list[bytes] = []
+
+    async def _drain(stream: asyncio.StreamReader) -> None:
+        while True:
+            line = await stream.readline()
+            if not line:
+                break
+            chunks.append(line)
+
+    timed_out = False
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(_drain(proc.stdout), _drain(proc.stderr), proc.wait()),
+            timeout=900,
         )
     except asyncio.TimeoutError:
-        proc.kill()
+        timed_out = True
+        try:
+            os.killpg(os.getpgid(proc.pid), _signal.SIGKILL)
+        except Exception:
+            proc.kill()
         await proc.wait()
-        log.error("runner.timeout", run_id=run_id)
-        return [{"test": "suite", "raw": "Test suite timed out after 120s", "selector": "", "expected": "", "actual": ""}]
-    output = stdout.decode() + stderr.decode()
+
+    output = b"".join(chunks).decode(errors="replace")
+
+    if timed_out:
+        log.error("runner.timeout", run_id=run_id, last_output=output[-3000:])
+        result = _parse_junit(RESULTS_PATH, output)
+        if result:
+            return result
+        return [{"test": "suite", "raw": f"Timed out after 900s. Last pytest output:\n{output[-1500:]}", "selector": "", "expected": "", "actual": ""}]
+
     if proc.returncode != 0:
         log.warning("runner.failures", run_id=run_id, returncode=proc.returncode, output=output[:2000])
     log.info("runner.done", run_id=run_id, returncode=proc.returncode)

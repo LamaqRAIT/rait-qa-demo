@@ -128,7 +128,7 @@
       const toast = document.getElementById('cart-toast');
       toast.textContent = `✓ ${btn.closest('.product-card').querySelector('.product-name').textContent} added`;
       toast.style.display = 'block';
-      setTimeout(() => { toast.style.display = 'none'; }, 2000);
+      setTimeout(() => { toast.style.display = 'none'; }, 5000);
     }
     function filterProducts(q) {
       document.querySelectorAll('.product-card').forEach(card => {

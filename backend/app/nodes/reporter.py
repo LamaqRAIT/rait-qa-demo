@@ -2,6 +2,7 @@
 Reporter node — deterministic template, no LLM call.
 All facts are already structured in RunRecord; LLM adds hallucination risk for zero benefit.
 """
+import json
 import structlog
 import app.db as db
 from app.core.state import RunRecord

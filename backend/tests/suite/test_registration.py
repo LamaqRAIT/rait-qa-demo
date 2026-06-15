@@ -1,5 +1,6 @@
 # INTENT: New users can register with valid credentials and are redirected to login.
 # JOURNEY: registration
+# PAGE: /register.html
 import pytest
 from playwright.sync_api import Page, expect
 

@@ -12,7 +12,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException
 import structlog
 import app.db as db
 from app.config import get_settings
-from app.core.state import RunRecord, RunStatus
+from app.core.state import RunRecord, RunStatus, HITLTrigger
 from app.core.pipeline import run_pipeline
 
 log = structlog.get_logger()
@@ -92,11 +92,31 @@ def _get_gh_repo():
 
 
 async def _push_change(flow: str, direction: str) -> str:
+    """Apply or revert a drift. Uses GCP demo server when demo_host_url is set."""
+    settings = get_settings()
     config = FLOW_CONFIGS[flow]
     find = config["find"] if direction == "inject" else config["revert_find"]
     replace = config["replace"] if direction == "inject" else config["revert_replace"]
-    msg = config["commit_msg"] if direction == "inject" else config["revert_msg"]
     file_path = config["file"]
+    filename = file_path.replace("demo-site/", "", 1)
+
+    if settings.demo_host_url:
+        import httpx
+        endpoint = f"{settings.demo_host_url.rstrip('/')}/_qa/{'inject' if direction == 'inject' else 'reset'}"
+        async with httpx.AsyncClient(timeout=10) as client:
+            if direction == "inject":
+                resp = await client.post(endpoint, json={"file": filename, "find": find, "replace": replace})
+            else:
+                resp = await client.post(endpoint)
+        if resp.status_code not in (200, 400):
+            resp.raise_for_status()
+        if resp.status_code == 400:
+            return ""  # find string not present — already reverted
+        log.info("demo.gcp_patch", direction=direction, flow=flow, file=filename)
+        return f"gcp-{direction}-{flow}"
+
+    # GitHub Pages path
+    msg = config["commit_msg"] if direction == "inject" else config["revert_msg"]
 
     def _do_push():
         repo = _get_gh_repo()
@@ -118,23 +138,21 @@ async def _push_change(flow: str, direction: str) -> str:
 
 
 async def _wait_for_pages_deployment(expected_sha: str, timeout: int = 120) -> bool:
-    """
-    Wait for GitHub Pages CDN to serve the drift commit.
-    Strategy: poll the raw HTML for evidence of the patched content.
-    Falls back to a fixed 90-second wait if verification can't be done.
-    """
+    """Wait for the drift to be live. No-op when using GCP demo server."""
     settings = get_settings()
-    import httpx
 
+    if settings.demo_host_url:
+        return True  # GCP server is synchronous — inject is instant
+
+    import httpx
     config = FLOW_CONFIGS.get(_active_drift.get("flow") or "", {})
     expected_fragment = config.get("replace", "") if config else ""
-
     file_path = config.get("file", "demo-site/checkout.html")
     page_path = file_path.replace("demo-site/", "", 1)
     probe_url = f"{settings.base_url.rstrip('/')}/{page_path}" if config else None
 
     deadline = asyncio.get_event_loop().time() + timeout
-    await asyncio.sleep(15)  # initial wait — Pages build takes at least 15s
+    await asyncio.sleep(15)
 
     while asyncio.get_event_loop().time() < deadline:
         if probe_url and expected_fragment:
@@ -169,8 +187,9 @@ async def inject_drift(
         status=RunStatus.PLANNING,
         trigger_commit="inject-drift",
         trigger_branch="main",
-        force_hitl=hitl,
     )
+    if hitl:
+        run.add_hitl_trigger(HITLTrigger.CALIBRATION_MODE)
     await db.create_run(run)
 
     _active_drift["flow"] = flow

@@ -1,0 +1,9 @@
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - build
+      - -t
+      - us-central1-docker.pkg.dev/rait-qa-agent/rait-qa-images/backend:demo-site-wiring
+      - .
+images:
+  - us-central1-docker.pkg.dev/rait-qa-agent/rait-qa-images/backend:demo-site-wiring

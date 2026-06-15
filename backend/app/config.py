@@ -16,7 +16,12 @@ def _fix_db_url(url: str) -> str:
 
 
 class Settings(BaseSettings):
-    # LLM providers (hybrid: Claude → Groq → Gemini)
+    # Self-hosted inference (vLLM on GPU VM — primary provider when set)
+    vllm_base_url: str = ""           # e.g. http://34.74.52.36:8000
+    vllm_model: str = "cyankiwi/gemma-4-26B-A4B-it-AWQ-4bit"
+    vllm_timeout: int = 120           # seconds — GPU cold-start can take ~50s
+
+    # LLM providers (fallback chain: vLLM → Claude → Groq → Gemini)
     anthropic_api_key: str = ""
     groq_api_key: str = ""
     google_api_key: str = ""
@@ -26,11 +31,32 @@ class Settings(BaseSettings):
 
     # Demo site
     base_url: str = "https://lamaqrait.github.io/rait-qa-demo"
+    demo_host_url: str = ""  # when set, use GCP demo server instead of GitHub API
     playwright_timeout: int = 20000
 
     # Pipeline thresholds
     auto_fix_threshold: float = 0.80
     max_run_cost_usd: float = 0.50
+
+    # Circuit breaker thresholds (all configurable — see production_evolution_plan.md §M1)
+    error_rate_ceiling: float = 0.20          # >20% fails in last 10 runs → suspend auto-fix
+    fpr_ceiling: float = 0.15                 # >15% human overrides in 30d → raise threshold
+    confidence_drift_pp_ceiling: float = 15.0 # 7d mean shifts >15pp from 30d baseline → alert
+    quarantine_threshold: int = 3             # consecutive failures before quarantine
+    fpr_recovery_threshold: float = 0.10      # error rate must drop below this to auto-recover
+
+    # Calibration mode — when True, ALL runs route to HITL (cold-start ground-truth building)
+    calibration_mode: bool = False
+    reflector_min_sample: int = 50            # Reflector won't propose changes until N confirmed runs
+
+    # Suite selector tuning
+    suite_selector_det_confidence: float = 0.70        # min confidence for deterministic path
+    suite_selector_max_fraction: float = 0.50           # if deterministic selects > this fraction → embedding
+    suite_selector_use_llm: bool = True                 # legacy flag, now controls embedding fallback
+    suite_selector_embedding_threshold: float = 0.35   # cosine similarity threshold for embedding path
+
+    # DOM inspector
+    dom_inspector_max_elements: int = 200     # elements scanned per selector (was hardcoded 50)
 
     # GitHub (GITHUB_PAT is an alias accepted from repo-root .env)
     github_token: str = ""

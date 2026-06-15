@@ -1,13 +1,16 @@
 """
-Smart suite selector — deterministic-first, LLM fallback.
+Smart suite selector — deterministic-first, Qwen3-Embedding-0.6B fallback.
 
 Steps:
 1. Get changed files from GitHub API for the trigger commit.
 2. For each changed demo-site/*.html|css|js file, find tests that visit that page.
 3. Also grep changed-file content for indexed selector strings.
 4. If ≥1 confident match → use deterministic list (method="deterministic").
-5. If 0 matches OR matches > 50% of total suite → use LLM (method="llm_fallback").
-6. If LLM fails → full suite (method="fallback_all").
+5. If 0 matches OR matches > 50% of total suite → Qwen3-Embedding-0.6B cosine similarity (method="embedding_fallback").
+6. If embedding fails → full suite (method="fallback_all").
+
+Embedding model replaces the LLM call: deterministic, inspectable scores, no API cost.
+Model weights are baked into the Docker image at build time.
 """
 import json
 import os
@@ -15,7 +18,6 @@ import glob
 import structlog
 import app.db as db
 from app.config import get_settings
-from app.llm.client import call_llm, strip_json_fences
 
 log = structlog.get_logger()
 
@@ -110,70 +112,104 @@ async def _deterministic_select(changed_files: list[dict]) -> tuple[list[str], f
     if not matched:
         return [], 0.0
 
+    settings = get_settings()
+    min_conf = settings.suite_selector_det_confidence
     # Sort by confidence descending
     ranked = sorted(matched.items(), key=lambda x: x[1], reverse=True)
-    files = [k for k, v in ranked if v >= 0.70]
+    files = [k for k, v in ranked if v >= min_conf]
     max_conf = ranked[0][1] if ranked else 0.0
     return files, max_conf
 
 
-async def _llm_select(changed_files: list[dict], all_suites: list[str]) -> tuple[list[str], bool]:
+_embedding_model = None
+
+
+def _get_embedding_model():
+    """Lazy-load Qwen3-Embedding-0.6B once, reuse across requests."""
+    global _embedding_model
+    if _embedding_model is not None:
+        return _embedding_model
+    try:
+        from sentence_transformers import SentenceTransformer
+        _embedding_model = SentenceTransformer(
+            "Qwen/Qwen3-Embedding-0.6B",
+            trust_remote_code=True,
+        )
+        log.info("suite_selector.embedding_model_loaded")
+    except Exception as exc:
+        log.warning("suite_selector.embedding_model_load_failed", error=str(exc)[:120])
+    return _embedding_model
+
+
+async def _embedding_select(
+    changed_files: list[dict],
+    all_suites: list[str],
+) -> tuple[list[str], bool, dict[str, float]]:
     """
-    LLM call to map changed files to test suites.
-    Returns (selected_suites, hitl_recommended).
+    Qwen3-Embedding-0.6B cosine similarity to map changed files to suites.
+    Replaces the LLM call — deterministic, inspectable, no API cost.
+    Returns (selected_suites, hitl_recommended, scores_dict).
     """
+    import asyncio
+    import numpy as np
+
+    model = _get_embedding_model()
+    if model is None:
+        return [], False, {}
+
     docstrings = _get_all_docstrings()
-    suite_descriptions = "\n".join(
-        f"- {f}: {docstrings.get(f, 'no description')}"
-        for f in all_suites
-    )
-    changed_summary = "\n".join(
-        f"- {c['filename']} ({c['status']}): {c['patch'][:150]}"
+
+    # Build query from changed file paths + diff snippets
+    query = " ".join(
+        f"{c['filename']} {c.get('patch', '')[:200]}"
         for c in changed_files[:10]
     )
 
-    prompt = f"""You are a QA engineer. Given the following changed files from a git commit, 
-determine which Playwright test suites should be run to catch potential regressions.
-
-CHANGED FILES:
-{changed_summary}
-
-AVAILABLE TEST SUITES:
-{suite_descriptions}
-
-Rules:
-- Select only the suites most likely to be affected by these changes.
-- If changes span multiple pages/components, select all relevant suites.
-- If the commit is clearly infrastructure/config (not UI), select none and recommend running all.
-- Set hitl_recommended=true if the commit is ambiguous or touches many files, 
-  meaning the triage classification is likely to have lower confidence.
-
-Reply with ONLY valid JSON:
-{{"suites": ["test_checkout.py", ...], "reason": "one sentence", "hitl_recommended": false}}"""
-
-    raw, _, _, _, _, _ = await call_llm(
-        prompt=prompt,
-        run_id="suite-selector",
-        call_name="suite_selection",
-        model_preference="haiku",
-        max_tokens=256,
-    )
-
-    if not raw:
-        return [], False
+    # Suite documents: filename + intent comment
+    suite_docs = [
+        f"{fname}: {docstrings.get(fname, fname.replace('test_', '').replace('.py', ''))}"
+        for fname in all_suites
+    ]
 
     try:
-        result = json.loads(strip_json_fences(raw))
-        suites = [s for s in result.get("suites", []) if s in all_suites]
-        hitl = bool(result.get("hitl_recommended", False))
-        log.info("suite_selector.llm", suites=suites, hitl=hitl)
-        return suites, hitl
+        # Run CPU inference in executor to avoid blocking the event loop
+        loop = asyncio.get_event_loop()
+        query_emb, doc_embs = await loop.run_in_executor(
+            None,
+            lambda: (
+                model.encode(query, normalize_embeddings=True),
+                model.encode(suite_docs, normalize_embeddings=True),
+            ),
+        )
+
+        scores = np.dot(doc_embs, query_emb).tolist()
+        scores_dict = {all_suites[i]: round(float(s), 4) for i, s in enumerate(scores)}
+
+        settings = get_settings()
+        threshold = getattr(settings, "suite_selector_embedding_threshold", 0.35)
+        selected = [fname for fname, score in scores_dict.items() if score >= threshold]
+
+        # Sort by score descending
+        selected.sort(key=lambda f: scores_dict[f], reverse=True)
+
+        # hitl if top two scores are very close (ambiguous which suite matters more)
+        sorted_scores = sorted(scores, reverse=True)
+        hitl = len(sorted_scores) >= 2 and (sorted_scores[0] - sorted_scores[1]) < 0.05
+
+        log.info(
+            "suite_selector.embedding",
+            selected=selected,
+            top_score=sorted_scores[0] if sorted_scores else 0,
+            hitl=hitl,
+        )
+        return selected, hitl, scores_dict
+
     except Exception as exc:
-        log.warning("suite_selector.llm_parse_error", error=str(exc)[:100])
-        return [], False
+        log.warning("suite_selector.embedding_failed", error=str(exc)[:120])
+        return [], False, {}
 
 
-async def select_suites(commit_sha: str) -> tuple[list[str], str, bool]:
+async def select_suites(commit_sha: str, run_id: str = "") -> tuple[list[str], str, bool]:
     """
     Main entry point.
     Returns (suites_to_run, method, force_hitl).
@@ -193,23 +229,30 @@ async def select_suites(commit_sha: str) -> tuple[list[str], str, bool]:
         log.info("suite_selector.no_changes", sha=commit_sha[:7])
         return all_suites, "fallback_all", False
 
+    settings = get_settings()
+    det_conf_floor = settings.suite_selector_det_confidence
+    max_fraction = settings.suite_selector_max_fraction
+    use_llm = settings.suite_selector_use_llm
+
     # Step 1: deterministic
     matched, confidence = await _deterministic_select(changed_files)
 
-    if matched and confidence >= 0.70:
-        # Check if we're selecting > 50% of all suites (ambiguous → LLM)
-        if len(matched) <= len(all_suites) * 0.5:
+    if matched and confidence >= det_conf_floor:
+        # Check if we're selecting > max_fraction of all suites (ambiguous → LLM)
+        if len(matched) <= len(all_suites) * max_fraction:
             log.info("suite_selector.deterministic", suites=matched, confidence=confidence)
             return matched, "deterministic", False
 
-    # Step 2: LLM fallback
-    log.info("suite_selector.using_llm", sha=commit_sha[:7], deterministic_matches=len(matched))
+    # Step 2: embedding cosine similarity (Qwen3-Embedding-0.6B)
+    log.info("suite_selector.using_embedding", sha=commit_sha[:7], deterministic_matches=len(matched))
     try:
-        llm_suites, hitl = await _llm_select(changed_files, all_suites)
-        if llm_suites:
-            return llm_suites, "llm_fallback", hitl
+        emb_suites, hitl, scores_dict = await _embedding_select(changed_files, all_suites)
+        if emb_suites:
+            if run_id:
+                await db.store_suite_selection_scores(run_id, scores_dict)
+            return emb_suites, "embedding_fallback", hitl
     except Exception as exc:
-        log.error("suite_selector.llm_error", error=str(exc)[:100])
+        log.error("suite_selector.embedding_error", error=str(exc)[:100])
 
     # Step 3: full suite fallback
     return all_suites, "fallback_all", False

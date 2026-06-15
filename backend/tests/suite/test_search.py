@@ -1,5 +1,6 @@
 # INTENT: Search functionality returns relevant products and handles empty results.
 # JOURNEY: search
+# PAGE: /search.html
 import pytest
 from playwright.sync_api import Page, expect
 

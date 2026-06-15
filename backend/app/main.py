@@ -60,8 +60,8 @@ app = FastAPI(title="RAIT QA Agent", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
+    allow_origins=settings.get_cors_origins(),
+    allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS", "PUT", "DELETE"],
     allow_headers=["*"],
 )

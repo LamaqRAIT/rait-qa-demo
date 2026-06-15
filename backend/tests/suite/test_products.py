@@ -1,5 +1,6 @@
 # INTENT: Product listing renders correctly and add-to-cart works.
 # JOURNEY: product_listing
+# PAGE: /products.html
 import pytest
 from playwright.sync_api import Page, expect
 

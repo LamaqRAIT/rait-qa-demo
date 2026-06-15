@@ -2,6 +2,7 @@
 Auto-fixer node — PyGithub: read test file → patch selector → push branch → open PR.
 Uses GitHub API only (no local git clone needed).
 """
+import difflib
 import structlog
 from app.config import get_settings
 from app.core.state import RunRecord
@@ -29,6 +30,43 @@ def _repo_path(local_path: str) -> str:
     return local_path
 
 
+def _resolve_old_str(content: str, old_str: str, run_id: str) -> str | None:
+    """
+    Exact match first, then fuzzy fallback (≥0.90 similarity).
+    Returns the string that should be replaced, or None if no match.
+    """
+    if old_str in content:
+        return old_str
+
+    # Fuzzy: scan every line in the file for the closest match
+    best_ratio = 0.0
+    best_line = None
+    for line in content.splitlines():
+        ratio = difflib.SequenceMatcher(None, old_str, line.strip()).ratio()
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_line = line.strip()
+
+    if best_ratio >= 0.90 and best_line:
+        log.info(
+            "auto_fixer.fuzzy_match",
+            run_id=run_id,
+            expected=old_str,
+            found=best_line,
+            similarity=round(best_ratio, 3),
+        )
+        return best_line
+
+    log.warning(
+        "auto_fixer.idempotency_guard",
+        run_id=run_id,
+        old=old_str,
+        best_similarity=round(best_ratio, 3),
+        message="Target string not found (exact or fuzzy) — already fixed or file modified",
+    )
+    return None
+
+
 async def auto_fix(run: RunRecord) -> str | None:
     settings = get_settings()
     proposed_fix = run.triage.proposed_fix
@@ -52,16 +90,11 @@ async def auto_fix(run: RunRecord) -> str | None:
         file_obj = repo.get_contents(file_path)
         content = file_obj.decoded_content.decode("utf-8")
 
-        if old_str not in content:
-            log.warning(
-                "auto_fixer.idempotency_guard",
-                run_id=run.id,
-                old=old_str,
-                message="Target string not found — already fixed or file modified",
-            )
+        effective_old = _resolve_old_str(content, old_str, run.id)
+        if effective_old is None:
             return None
 
-        patched = content.replace(old_str, new_str, 1)
+        patched = content.replace(effective_old, new_str, 1)
         branch_name = "qa-agent/auto-heal"
         main_sha = repo.get_branch("main").commit.sha
 

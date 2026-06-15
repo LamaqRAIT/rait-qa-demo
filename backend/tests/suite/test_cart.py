@@ -1,5 +1,6 @@
 # INTENT: Cart page renders items, allows quantity adjustment, and has a checkout button.
 # JOURNEY: cart_flow
+# PAGE: /cart.html
 import pytest
 from playwright.sync_api import Page, expect
 

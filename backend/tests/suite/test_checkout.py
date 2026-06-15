@@ -1,5 +1,6 @@
 # INTENT: User can complete the checkout flow by clicking the submit button.
 # JOURNEY: checkout_flow
+# PAGE: /checkout.html
 import pytest
 from playwright.sync_api import Page, expect
 

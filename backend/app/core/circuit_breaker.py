@@ -14,15 +14,18 @@ from app.config import get_settings
 
 log = structlog.get_logger()
 
-QUARANTINE_THRESHOLD = 3
 _THRESHOLD_OVERRIDE: float | None = None  # runtime override set by circuit breakers
 
 
 def get_effective_threshold() -> float:
     """Return the current auto-fix confidence threshold, potentially overridden by circuit breakers."""
+    settings = get_settings()
+    # calibration_mode routes everything to HITL regardless of confidence
+    if settings.calibration_mode:
+        return 1.01
     if _THRESHOLD_OVERRIDE is not None:
         return _THRESHOLD_OVERRIDE
-    return get_settings().auto_fix_threshold
+    return settings.auto_fix_threshold
 
 
 def _set_threshold_override(value: float) -> None:
@@ -66,28 +69,31 @@ async def check_cost_and_record(cost_usd: float, run_id: str) -> bool:
 async def check_error_rate(run_id: str | None = None) -> float:
     """
     Check error rate over last 10 runs.
-    If > 20%, suspend auto-fix (threshold → 1.01) and fire event.
+    If > error_rate_ceiling, suspend auto-fix (threshold → 1.01) and fire event.
     Returns the current error rate.
     """
+    settings = get_settings()
+    ceiling = settings.error_rate_ceiling
+    recovery = settings.fpr_recovery_threshold
     rate = await db.get_recent_error_rate(window=10)
-    if rate > 0.20:
-        msg = f"Error rate {rate:.0%} over last 10 runs exceeds 20% threshold — auto-fix suspended"
-        log.warning("circuit_breaker.error_rate", rate=rate, run_id=run_id)
+    if rate > ceiling:
+        msg = f"Error rate {rate:.0%} over last 10 runs exceeds {ceiling:.0%} threshold — auto-fix suspended"
+        log.warning("circuit_breaker.error_rate", rate=rate, ceiling=ceiling, run_id=run_id)
         _set_threshold_override(1.01)  # effectively forces all fixes to HITL
         await db.record_system_event(
             "error_rate_exceeded",
             msg,
             severity="critical",
             run_id=run_id,
-            meta={"error_rate": rate},
+            meta={"error_rate": rate, "ceiling": ceiling},
         )
         try:
             from app.integrations.slack import notify_circuit_breaker
             await notify_circuit_breaker("error_rate_exceeded", msg, {"error_rate": rate})
         except Exception:
             pass
-    elif _THRESHOLD_OVERRIDE == 1.01 and rate <= 0.10:
-        # Reset threshold once error rate recovers below 10%
+    elif _THRESHOLD_OVERRIDE == 1.01 and rate <= recovery:
+        # Reset threshold once error rate recovers below recovery threshold
         reset_threshold_override()
         log.info("circuit_breaker.error_rate_recovered", rate=rate)
         await db.record_system_event(
@@ -104,14 +110,16 @@ async def check_error_rate(run_id: str | None = None) -> float:
 async def check_false_positive_rate(run_id: str | None = None) -> float:
     """
     Check human override rate over 30d as FPR proxy.
-    If > 15%, raise auto-fix threshold to 0.90.
+    If > fpr_ceiling, raise auto-fix threshold to 0.90.
     Returns the current FPR.
     """
+    settings = get_settings()
+    ceiling = settings.fpr_ceiling
     stats = await db.get_override_rate(days=30)
     fpr = stats.get("override_rate", 0.0)
-    if fpr > 0.15 and stats.get("total", 0) >= 5:
-        msg = f"Human override rate {fpr:.0%} over 30d exceeds 15% — confidence threshold raised to 0.90"
-        log.warning("circuit_breaker.fpr", fpr=fpr, run_id=run_id)
+    if fpr > ceiling and stats.get("total", 0) >= 5:
+        msg = f"Human override rate {fpr:.0%} over 30d exceeds {ceiling:.0%} — confidence threshold raised to 0.90"
+        log.warning("circuit_breaker.fpr", fpr=fpr, ceiling=ceiling, run_id=run_id)
         if (_THRESHOLD_OVERRIDE or 0) < 0.90:
             _set_threshold_override(0.90)
         await db.record_system_event(
@@ -133,15 +141,17 @@ async def check_false_positive_rate(run_id: str | None = None) -> float:
 
 async def check_confidence_drift(run_id: str | None = None) -> float:
     """
-    Alert if 7d mean confidence shifts > 15pp from 30d baseline.
+    Alert if 7d mean confidence shifts > confidence_drift_pp_ceiling from 30d baseline.
     Returns the shift in pp.
     """
+    settings = get_settings()
+    ceiling = settings.confidence_drift_pp_ceiling
     stats = await db.get_confidence_stats(days=7)
     shift = stats.get("shift_pp", 0.0)
-    if shift > 15.0:
+    if shift > ceiling:
         msg = (
             f"Confidence distribution shifted {shift:.1f}pp from 30d baseline "
-            f"(7d mean: {stats['mean_7d']:.2f}, 30d mean: {stats['mean_30d']:.2f}) — "
+            f"(7d mean: {stats['mean_7d']:.2f}, 30d mean: {stats['mean_30d']:.2f}, ceiling: {ceiling}pp) — "
             "classifier may be seeing a new failure class or prompt drift"
         )
         log.warning("circuit_breaker.confidence_drift", shift=shift, run_id=run_id)
@@ -163,14 +173,16 @@ async def check_confidence_drift(run_id: str | None = None) -> float:
 # ── 5. Quarantine ─────────────────────────────────────────────────────────────
 
 def should_quarantine(consecutive_failures: int) -> bool:
-    if consecutive_failures >= QUARANTINE_THRESHOLD:
-        log.warning("circuit_breaker.quarantine", consecutive_failures=consecutive_failures, threshold=QUARANTINE_THRESHOLD)
+    threshold = get_settings().quarantine_threshold
+    if consecutive_failures >= threshold:
+        log.warning("circuit_breaker.quarantine", consecutive_failures=consecutive_failures, threshold=threshold)
         return True
     return False
 
 
 async def record_quarantine(run_id: str, test_name: str = "") -> None:
-    msg = f"Test{' ' + test_name if test_name else ''} quarantined after {QUARANTINE_THRESHOLD}+ consecutive failures"
+    threshold = get_settings().quarantine_threshold
+    msg = f"Test{' ' + test_name if test_name else ''} quarantined after {threshold}+ consecutive failures"
     await db.record_system_event("quarantine_triggered", msg, severity="warning", run_id=run_id)
     try:
         from app.integrations.slack import notify_circuit_breaker

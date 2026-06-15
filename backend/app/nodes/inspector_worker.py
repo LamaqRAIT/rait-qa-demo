@@ -6,8 +6,14 @@ Returns JSON to stdout.
 Deterministic fingerprint scan — zero LLM tokens for common cases.
 """
 import json
+import os
 import sys
 import difflib
+
+# Configurable via payload["max_elements"] (set from Settings.dom_inspector_max_elements)
+_DEFAULT_MAX_ELEMENTS = int(os.environ.get("DOM_INSPECTOR_MAX_ELEMENTS", "200"))
+# Multi-tag selector covers all interactive element types a test might target
+_INTERACTIVE_SELECTOR = "button, a, input, select, textarea, [role='button'], [role='link'], [role='checkbox'], [role='tab']"
 
 
 def _class_prefix_overlap(old_cls: str, new_cls: str) -> float:
@@ -17,7 +23,7 @@ def _class_prefix_overlap(old_cls: str, new_cls: str) -> float:
     return ratio
 
 
-def inspect_selectors(url: str, failing_selectors: list[str], timeout: int = 20000) -> dict:
+def inspect_selectors(url: str, failing_selectors: list[str], timeout: int = 20000, max_elements: int = _DEFAULT_MAX_ELEMENTS) -> dict:
     from playwright.sync_api import sync_playwright
 
     results = {}
@@ -44,31 +50,35 @@ def inspect_selectors(url: str, failing_selectors: list[str], timeout: int = 200
                     results[selector] = {
                         "found_on_page": True,
                         "candidates": [],
+                        "full_scan": [],
                         "note": "Selector still resolves — failure is NOT selector-related",
                     }
                     continue
 
-                candidates = _fingerprint_scan(page, selector)
+                all_candidates = _fingerprint_scan(page, selector, max_elements=max_elements)
                 results[selector] = {
                     "found_on_page": False,
-                    "candidates": candidates[:3],
+                    "candidates": all_candidates[:3],      # top 3 for auto_fixer
+                    "full_scan": all_candidates[:20],      # top 20 for explainability
                 }
             except Exception as exc:
-                results[selector] = {"error": str(exc), "candidates": []}
+                results[selector] = {"error": str(exc), "candidates": [], "full_scan": []}
 
         browser.close()
 
     return {"url": url, "selectors": results}
 
 
-def _fingerprint_scan(page, old_selector: str) -> list[dict]:
+def _fingerprint_scan(page, old_selector: str, max_elements: int = _DEFAULT_MAX_ELEMENTS) -> list[dict]:
     tag = _guess_tag(old_selector)
     old_classes = _extract_classes(old_selector)
     old_text = _extract_text(old_selector)
 
     candidates = []
     try:
-        elements = page.locator(tag or "*").all()[:50]
+        # Use the interactive multi-tag selector for broad coverage; fall back to tag-only
+        scan_selector = _INTERACTIVE_SELECTOR if not tag else f"{tag}, {_INTERACTIVE_SELECTOR}"
+        elements = page.locator(scan_selector).all()[:max_elements]
     except Exception:
         return []
 
@@ -187,6 +197,7 @@ if __name__ == "__main__":
             url=payload["url"],
             failing_selectors=payload.get("selectors", []),
             timeout=payload.get("timeout", 20000),
+            max_elements=payload.get("max_elements", _DEFAULT_MAX_ELEMENTS),
         )
         print(json.dumps(result))
     except Exception as exc:

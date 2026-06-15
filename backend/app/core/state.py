@@ -1,5 +1,5 @@
 """
-RunStatus enum and RunRecord dataclass.
+RunStatus enum, HITLTrigger enum, and RunRecord dataclass.
 Replaces LangGraph state management — every transition is a DB write.
 """
 from enum import Enum
@@ -20,6 +20,19 @@ class RunStatus(str, Enum):
     QUARANTINED     = "quarantined"
 
 
+class HITLTrigger(str, Enum):
+    """Named sources that can force a run into AWAITING_HUMAN.
+    Multiple triggers are OR-combined — any one is sufficient."""
+    TOP2_AMBIGUOUS       = "top2_within_0.10"        # top-2 DOM candidates within 0.10 confidence
+    LOW_CONFIDENCE       = "low_confidence"           # triage confidence below auto_fix_threshold
+    FPR_BREAKER_ACTIVE   = "fpr_breaker_active"       # FPR circuit breaker raised threshold
+    ERROR_RATE_ACTIVE    = "error_rate_breaker_active" # error rate circuit breaker suspended auto-fix
+    CALIBRATION_MODE     = "calibration_mode"         # system in cold-start calibration mode
+    LLM_SUITE_AMBIGUOUS  = "llm_suite_hitl_flag"      # suite selector LLM flagged ambiguity
+    NO_PROPOSED_FIX      = "no_proposed_fix"          # drift classified but no fix could be generated
+    HUMAN_RECLASSIFIED   = "human_reclassified"       # human changed classification on a previous run
+
+
 @dataclass
 class NodeState:
     state: str = "idle"
@@ -32,6 +45,11 @@ class TriageResult:
     confidence: float = 0.0
     evidence: str = ""
     proposed_fix: dict[str, Any] | None = None
+    # Two-step gate signals (populated when vLLM two-step triage runs)
+    p_class: float = 0.0           # softmax prob of winning class from Step A logprobs
+    logprob_margin: float = 0.0    # top1 − top2 logprob (nats) — measures separation
+    fix_grounded: bool | None = None  # proposed_fix.old found in test file
+    dom_corroboration: float = 0.0    # best DOM candidate confidence
 
 
 @dataclass
@@ -58,8 +76,17 @@ class RunRecord:
     human_override: bool = False
     override_reason: str | None = None
     consecutive_failures: int = 0
-    force_hitl: bool = False
+    hitl_triggers: list[str] = field(default_factory=list)
     suite_selection_method: str = "fallback_all"
+
+    @property
+    def force_hitl(self) -> bool:
+        """True when any HITL trigger has been set."""
+        return len(self.hitl_triggers) > 0
+
+    def add_hitl_trigger(self, trigger: "HITLTrigger") -> None:
+        if trigger.value not in self.hitl_triggers:
+            self.hitl_triggers.append(trigger.value)
     report_text: str | None = None
     created_at: datetime = field(default_factory=datetime.utcnow)
     updated_at: datetime = field(default_factory=datetime.utcnow)
@@ -80,6 +107,10 @@ class RunRecord:
                 "confidence": self.triage.confidence,
                 "evidence": self.triage.evidence,
                 "proposed_fix": self.triage.proposed_fix,
+                "p_class": self.triage.p_class,
+                "logprob_margin": self.triage.logprob_margin,
+                "fix_grounded": self.triage.fix_grounded,
+                "dom_corroboration": self.triage.dom_corroboration,
             } if self.triage.classification else None,
             "node_states": {
                 k: {"node": k, "state": v.state, "annotation": v.annotation}
@@ -96,7 +127,8 @@ class RunRecord:
             "human_override": self.human_override,
             "override_reason": self.override_reason,
             "consecutive_failures": self.consecutive_failures,
-            "force_hitl": self.force_hitl,
+            "hitl_triggers": self.hitl_triggers,
+            "force_hitl": self.force_hitl,  # derived property — kept for API compatibility
             "suite_selection_method": self.suite_selection_method,
             "report_text": self.report_text,
             "created_at": self.created_at.isoformat(),
@@ -125,6 +157,10 @@ class RunRecord:
                 confidence=triage_data.get("confidence", 0.0),
                 evidence=triage_data.get("evidence", ""),
                 proposed_fix=triage_data.get("proposed_fix"),
+                p_class=triage_data.get("p_class", 0.0),
+                logprob_margin=triage_data.get("logprob_margin", 0.0),
+                fix_grounded=triage_data.get("fix_grounded"),
+                dom_corroboration=triage_data.get("dom_corroboration", 0.0),
             ),
             node_states=node_states,
             approved_by=d.get("approved_by"),
@@ -138,7 +174,7 @@ class RunRecord:
             human_override=d.get("human_override", False),
             override_reason=d.get("override_reason"),
             consecutive_failures=d.get("consecutive_failures", 0),
-            force_hitl=d.get("force_hitl", False),
+            hitl_triggers=d.get("hitl_triggers", []),
             suite_selection_method=d.get("suite_selection_method", "fallback_all"),
             report_text=d.get("report_text"),
             created_at=datetime.fromisoformat(d["created_at"]) if d.get("created_at") else datetime.utcnow(),

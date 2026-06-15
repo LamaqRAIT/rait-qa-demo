@@ -14,6 +14,12 @@ def base_url() -> str:
     return BASE_URL
 
 
+@pytest.fixture(scope="session")
+def browser_type_launch_args(browser_type_launch_args: dict) -> dict:
+    """Add --no-sandbox for containerised Linux environments (Cloud Run, Docker)."""
+    return {**browser_type_launch_args, "args": ["--no-sandbox", "--disable-dev-shm-usage"]}
+
+
 @pytest.fixture
 def page_with_base(page: Page, base_url: str):
     """Page fixture pre-navigated to the demo site base."""

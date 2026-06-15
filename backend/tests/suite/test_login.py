@@ -1,5 +1,6 @@
 # INTENT: User can log in with valid credentials and reach the dashboard.
 # JOURNEY: login_flow
+# PAGE: /login.html
 import pytest
 from playwright.sync_api import Page, expect
 

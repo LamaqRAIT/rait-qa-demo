@@ -1,5 +1,6 @@
 # INTENT: Account settings page renders profile form and password change form.
 # JOURNEY: account_settings
+# PAGE: /account.html
 import pytest
 from playwright.sync_api import Page, expect
 

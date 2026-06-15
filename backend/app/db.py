@@ -34,9 +34,29 @@ class DBRunRecord(Base):
     suite_selection_method  = Column(String, default="fallback_all")
     report_text             = Column(Text, nullable=True)
     langfuse_trace_url      = Column(Text, nullable=True)
+    # E1: Prompt auditing
+    triage_prompt           = Column(Text, nullable=True)
+    triage_response         = Column(Text, nullable=True)
+    triage_prompt_hash      = Column(String(64), nullable=True)
     data_json               = Column(Text, default="{}")
     created_at              = Column(DateTime, default=datetime.utcnow)
     updated_at              = Column(DateTime, default=datetime.utcnow)
+    # Rework: five-signal confidence gate (queryable columns — replaces model-generated confidence)
+    p_class                 = Column(Float, nullable=True)    # logprob of winning class
+    logprob_margin          = Column(Float, nullable=True)    # top1 − top2 logprob
+    nli_entailment          = Column(Float, nullable=True)    # DeBERTa entailment score
+    fix_grounded            = Column(Boolean, nullable=True)  # proposed_fix.old exists in file
+    dom_corroboration       = Column(Float, nullable=True)    # inspector best candidate confidence
+    gate_route              = Column(String, nullable=True)   # auto_fix | human_review
+    gate_held_checks        = Column(Text, nullable=True)     # JSON: which signals failed
+    # Rework: latency breakdown (promoted from data_json for queryability)
+    triage_ttft_ms          = Column(Integer, nullable=True)
+    triage_total_ms         = Column(Integer, nullable=True)
+    nli_latency_ms          = Column(Integer, nullable=True)
+    embedding_latency_ms    = Column(Integer, nullable=True)
+    # Rework: suite selection scores + DOM snapshot GCS path
+    suite_selection_scores  = Column(Text, nullable=True)     # JSON: {suite: cosine_score}
+    dom_snapshot_gcs_path   = Column(Text, nullable=True)
 
 
 # ── System events (circuit breakers, alerts) ──────────────────────────────────
@@ -133,11 +153,25 @@ class DBFlakinesScore(Base):
 
 
 class DBFailurePattern(Base):
+    """C3: Human-verified failure patterns — training signal for future RAG (I4, Horizon 2)."""
     __tablename__ = "failure_patterns"
-    id             = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    selector       = Column(Text)
-    outcome        = Column(String)
-    created_at     = Column(DateTime, default=datetime.utcnow)
+    id                  = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    run_id              = Column(String, nullable=True)
+    original_class      = Column(String)          # what the LLM classified
+    verified_class      = Column(String)          # what the human confirmed/corrected
+    evidence_json       = Column(Text, default="{}") # failures + dom_report snapshot
+    triage_prompt_hash  = Column(String(64), nullable=True)
+    verified            = Column(Boolean, default=True)  # False = auto-confirmed, True = human-verified
+    created_at          = Column(DateTime, default=datetime.utcnow)
+
+
+class DBConfigOverride(Base):
+    """M2: Runtime config overrides — key/value pairs that shadow Settings env vars."""
+    __tablename__ = "config_overrides"
+    key         = Column(String, primary_key=True)
+    value       = Column(Text)
+    updated_by  = Column(String, default="system")
+    updated_at  = Column(DateTime, default=datetime.utcnow)
 
 
 class DBSyntheticRun(Base):
@@ -206,6 +240,40 @@ async def _migrate_schema() -> None:
         "ALTER TABLE tickets ADD COLUMN IF NOT EXISTS jira_remote_id   VARCHAR",
         "ALTER TABLE tickets ADD COLUMN IF NOT EXISTS jira_url         TEXT",
         "ALTER TABLE tickets ADD COLUMN IF NOT EXISTS updated_at       TIMESTAMP",
+        # qa_runs — E1 prompt auditing columns added in v3
+        "ALTER TABLE qa_runs ADD COLUMN IF NOT EXISTS triage_prompt       TEXT",
+        "ALTER TABLE qa_runs ADD COLUMN IF NOT EXISTS triage_response     TEXT",
+        "ALTER TABLE qa_runs ADD COLUMN IF NOT EXISTS triage_prompt_hash  VARCHAR(64)",
+        # failure_patterns — C3 full schema migration
+        "ALTER TABLE failure_patterns ADD COLUMN IF NOT EXISTS run_id             VARCHAR",
+        "ALTER TABLE failure_patterns ADD COLUMN IF NOT EXISTS original_class     VARCHAR",
+        "ALTER TABLE failure_patterns ADD COLUMN IF NOT EXISTS verified_class     VARCHAR",
+        "ALTER TABLE failure_patterns ADD COLUMN IF NOT EXISTS evidence_json      TEXT DEFAULT '{}'",
+        "ALTER TABLE failure_patterns ADD COLUMN IF NOT EXISTS triage_prompt_hash VARCHAR(64)",
+        "ALTER TABLE failure_patterns ADD COLUMN IF NOT EXISTS verified           BOOLEAN DEFAULT TRUE",
+        # config_overrides — M2 new table (create_all handles it; migration here is idempotent)
+        """CREATE TABLE IF NOT EXISTS config_overrides (
+            key        VARCHAR PRIMARY KEY,
+            value      TEXT,
+            updated_by VARCHAR DEFAULT 'system',
+            updated_at TIMESTAMP DEFAULT NOW()
+        )""",
+        # Rework v4: five-signal confidence gate columns
+        "ALTER TABLE qa_runs ADD COLUMN IF NOT EXISTS p_class               FLOAT",
+        "ALTER TABLE qa_runs ADD COLUMN IF NOT EXISTS logprob_margin        FLOAT",
+        "ALTER TABLE qa_runs ADD COLUMN IF NOT EXISTS nli_entailment        FLOAT",
+        "ALTER TABLE qa_runs ADD COLUMN IF NOT EXISTS fix_grounded          BOOLEAN",
+        "ALTER TABLE qa_runs ADD COLUMN IF NOT EXISTS dom_corroboration     FLOAT",
+        "ALTER TABLE qa_runs ADD COLUMN IF NOT EXISTS gate_route            VARCHAR",
+        "ALTER TABLE qa_runs ADD COLUMN IF NOT EXISTS gate_held_checks      TEXT",
+        # Rework v4: latency breakdown columns
+        "ALTER TABLE qa_runs ADD COLUMN IF NOT EXISTS triage_ttft_ms       INTEGER",
+        "ALTER TABLE qa_runs ADD COLUMN IF NOT EXISTS triage_total_ms      INTEGER",
+        "ALTER TABLE qa_runs ADD COLUMN IF NOT EXISTS nli_latency_ms       INTEGER",
+        "ALTER TABLE qa_runs ADD COLUMN IF NOT EXISTS embedding_latency_ms INTEGER",
+        # Rework v4: suite scores + GCS snapshot
+        "ALTER TABLE qa_runs ADD COLUMN IF NOT EXISTS suite_selection_scores TEXT",
+        "ALTER TABLE qa_runs ADD COLUMN IF NOT EXISTS dom_snapshot_gcs_path  TEXT",
     ]
 
     async with _engine.begin() as conn:
@@ -311,6 +379,38 @@ async def update_run(run: RunRecord) -> None:
             rec.report_text = getattr(run, "report_text", None)
             rec.langfuse_trace_url = getattr(run, "langfuse_trace_url", None)
             rec.data_json = json.dumps(run.to_dict())
+            rec.updated_at = _utcnow()
+            await s.commit()
+
+
+async def store_suite_selection_scores(run_id: str, scores: dict[str, float]) -> None:
+    """Store embedding cosine scores for the given run."""
+    async with _session_factory() as s:
+        rec = await s.get(DBRunRecord, run_id)
+        if rec:
+            rec.suite_selection_scores = json.dumps(scores)
+            rec.updated_at = _utcnow()
+            await s.commit()
+
+
+async def store_gate_signals(
+    run_id: str,
+    p_class: float,
+    logprob_margin: float,
+    fix_grounded: "bool | None",
+    dom_corroboration: float,
+    gate_route: str,
+    gate_held_checks: list[str],
+) -> None:
+    async with _session_factory() as s:
+        rec = await s.get(DBRunRecord, run_id)
+        if rec:
+            rec.p_class = p_class
+            rec.logprob_margin = logprob_margin
+            rec.fix_grounded = fix_grounded
+            rec.dom_corroboration = dom_corroboration
+            rec.gate_route = gate_route
+            rec.gate_held_checks = json.dumps(gate_held_checks)
             rec.updated_at = _utcnow()
             await s.commit()
 
@@ -722,3 +822,270 @@ async def count_consecutive_failures(test_name: str) -> int:
         """), {"pattern": f"%{test_name}%"})
         row = result.fetchone()
         return row[0] if row else 0
+
+
+# ── E1: Prompt auditing ───────────────────────────────────────────────────────
+
+async def store_triage_audit(
+    run_id: str,
+    triage_prompt: str,
+    triage_response: str,
+    prompt_hash: str,
+) -> None:
+    """Write prompt/response/hash to qa_runs columns for full LLM auditability."""
+    async with _session_factory() as s:
+        await s.execute(
+            text("""
+                UPDATE qa_runs
+                SET triage_prompt = :prompt,
+                    triage_response = :response,
+                    triage_prompt_hash = :hash,
+                    updated_at = :now
+                WHERE id = :id
+            """),
+            {
+                "prompt": triage_prompt[:50000],   # cap at 50k chars to avoid DB bloat
+                "response": triage_response[:5000],
+                "hash": prompt_hash,
+                "now": _utcnow(),
+                "id": run_id,
+            },
+        )
+        await s.commit()
+
+
+async def get_run_triage_prompt(run_id: str) -> tuple[str, str, str]:
+    """Returns (triage_prompt, triage_response, triage_prompt_hash) for E2 replay."""
+    async with _session_factory() as s:
+        result = await s.execute(
+            text("SELECT triage_prompt, triage_response, triage_prompt_hash FROM qa_runs WHERE id = :id"),
+            {"id": run_id},
+        )
+        row = result.fetchone()
+        if not row:
+            return "", "", ""
+        return row[0] or "", row[1] or "", row[2] or ""
+
+
+# ── C3: Failure pattern CRUD ──────────────────────────────────────────────────
+
+async def store_failure_pattern(
+    run_id: str,
+    original_class: str,
+    verified_class: str,
+    evidence: dict,
+    prompt_hash: str = "",
+    verified: bool = True,
+) -> None:
+    """Record a human-verified (or auto-confirmed) triage outcome for future RAG."""
+    async with _session_factory() as s:
+        s.add(DBFailurePattern(
+            id=str(uuid.uuid4()),
+            run_id=run_id,
+            original_class=original_class,
+            verified_class=verified_class,
+            evidence_json=json.dumps(evidence),
+            triage_prompt_hash=prompt_hash,
+            verified=verified,
+        ))
+        await s.commit()
+
+
+async def list_failure_patterns(limit: int = 50, verified_only: bool = True) -> list[dict]:
+    async with _session_factory() as s:
+        if verified_only:
+            result = await s.execute(
+                text("SELECT id, run_id, original_class, verified_class, verified, created_at FROM failure_patterns WHERE verified = TRUE ORDER BY created_at DESC LIMIT :limit"),
+                {"limit": limit},
+            )
+        else:
+            result = await s.execute(
+                text("SELECT id, run_id, original_class, verified_class, verified, created_at FROM failure_patterns ORDER BY created_at DESC LIMIT :limit"),
+                {"limit": limit},
+            )
+        keys = ["id", "run_id", "original_class", "verified_class", "verified", "created_at"]
+        return [dict(zip(keys, r)) for r in result.fetchall()]
+
+
+# ── M2: Config overrides CRUD ─────────────────────────────────────────────────
+
+async def get_config_overrides() -> dict[str, str]:
+    """Return all active config overrides as {key: value}."""
+    async with _session_factory() as s:
+        result = await s.execute(text("SELECT key, value FROM config_overrides"))
+        return {r[0]: r[1] for r in result.fetchall()}
+
+
+async def set_config_override(key: str, value: str, updated_by: str = "system") -> None:
+    settings = get_settings()
+    pg = settings.is_postgres()
+    async with _session_factory() as s:
+        if pg:
+            await s.execute(
+                text("INSERT INTO config_overrides (key, value, updated_by, updated_at) VALUES (:k, :v, :u, :now) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_by = EXCLUDED.updated_by, updated_at = EXCLUDED.updated_at"),
+                {"k": key, "v": value, "u": updated_by, "now": _utcnow()},
+            )
+        else:
+            # SQLite upsert
+            await s.execute(
+                text("INSERT OR REPLACE INTO config_overrides (key, value, updated_by, updated_at) VALUES (:k, :v, :u, :now)"),
+                {"k": key, "v": value, "u": updated_by, "now": _utcnow()},
+            )
+        await s.commit()
+
+
+async def delete_config_override(key: str) -> None:
+    async with _session_factory() as s:
+        await s.execute(text("DELETE FROM config_overrides WHERE key = :k"), {"k": key})
+        await s.commit()
+
+
+# ── M3: Trends time-series ────────────────────────────────────────────────────
+
+async def get_metrics_trends(days: int = 30, bucket: str = "day") -> list[dict]:
+    """
+    Returns daily/weekly time-series of run counts and auto-fix vs HITL split.
+    bucket: 'day' | 'week'
+    """
+    settings = get_settings()
+    pg = settings.is_postgres()
+    cutoff = _days_ago_sql(days, pg)
+
+    if pg:
+        trunc_fn = "DATE_TRUNC('day', created_at)" if bucket == "day" else "DATE_TRUNC('week', created_at)"
+        sql = f"""
+            SELECT
+                {trunc_fn} as period,
+                COUNT(*) as run_count,
+                SUM(CASE WHEN status = 'complete' THEN 1 ELSE 0 END) as complete_count,
+                SUM(CASE WHEN human_override THEN 1 ELSE 0 END) as hitl_count,
+                AVG(confidence) as avg_confidence,
+                AVG(cost_usd) as avg_cost,
+                SUM(cost_usd) as total_cost
+            FROM qa_runs
+            WHERE created_at > {cutoff}
+            GROUP BY {trunc_fn}
+            ORDER BY period ASC
+        """
+    else:
+        # SQLite date truncation
+        trunc_fn = "strftime('%Y-%m-%d', created_at)"
+        sql = f"""
+            SELECT
+                {trunc_fn} as period,
+                COUNT(*) as run_count,
+                SUM(CASE WHEN status = 'complete' THEN 1 ELSE 0 END) as complete_count,
+                SUM(CASE WHEN human_override THEN 1 ELSE 0 END) as hitl_count,
+                AVG(confidence) as avg_confidence,
+                AVG(cost_usd) as avg_cost,
+                SUM(cost_usd) as total_cost
+            FROM qa_runs
+            WHERE created_at > {cutoff}
+            GROUP BY {trunc_fn}
+            ORDER BY period ASC
+        """
+
+    async with _session_factory() as s:
+        result = await s.execute(text(sql))
+        rows = result.fetchall()
+
+    return [
+        {
+            "period": str(r[0]),
+            "run_count": r[1],
+            "complete_count": r[2],
+            "hitl_count": r[3],
+            "auto_fix_count": (r[2] or 0) - (r[3] or 0),
+            "avg_confidence": round(r[4] or 0, 3),
+            "avg_cost_usd": round(r[5] or 0, 5),
+            "total_cost_usd": round(r[6] or 0, 4),
+        }
+        for r in rows
+    ]
+
+
+# ── M4: Group-by on summary metrics ──────────────────────────────────────────
+
+async def get_recent_runs_since(cutoff: "datetime", limit: int = 50) -> list[dict]:
+    """
+    Return lightweight run rows since cutoff for test_history assembly.
+    Only fetches columns needed for the history summary — avoids loading data_json.
+    """
+    async with _session_factory() as s:
+        result = await s.execute(
+            text("""
+                SELECT classification, confidence, human_override, status, created_at,
+                       data_json
+                FROM qa_runs
+                WHERE created_at >= :cutoff
+                ORDER BY created_at DESC
+                LIMIT :limit
+            """),
+            {"cutoff": cutoff, "limit": limit},
+        )
+        rows = result.fetchall()
+
+    records = []
+    for r in rows:
+        row = {
+            "classification": r[0],
+            "confidence": r[1],
+            "human_override": bool(r[2]),
+            "status": r[3],
+            "created_at": r[4],
+            "pr_url": None,
+        }
+        # Extract pr_url from data_json without loading the whole RunRecord
+        try:
+            d = json.loads(r[5] or "{}")
+            row["pr_url"] = d.get("pr_url")
+        except Exception:
+            pass
+        records.append(row)
+    return records
+
+
+async def get_metrics_summary_grouped(days: int = 7, group_by: str = "team_id") -> list[dict]:
+    """
+    Returns metrics summary broken down by group_by column.
+    group_by: 'team_id' | 'classification' | 'suite_selection_method'
+    """
+    allowed_groups = {"team_id", "classification", "suite_selection_method"}
+    if group_by not in allowed_groups:
+        raise ValueError(f"group_by must be one of {allowed_groups}")
+
+    settings = get_settings()
+    pg = settings.is_postgres()
+    cutoff = _days_ago_sql(days, pg)
+
+    sql = f"""
+        SELECT
+            {group_by} as group_key,
+            COUNT(*) as total_runs,
+            SUM(CASE WHEN status = 'complete' THEN 1 ELSE 0 END) as success_runs,
+            AVG(cost_usd) as avg_cost_usd,
+            SUM(cost_usd) as total_cost_usd,
+            AVG(confidence) as avg_confidence
+        FROM qa_runs
+        WHERE created_at > {cutoff}
+        GROUP BY {group_by}
+        ORDER BY total_runs DESC
+    """
+
+    async with _session_factory() as s:
+        result = await s.execute(text(sql))
+        rows = result.fetchall()
+
+    return [
+        {
+            "group_by": group_by,
+            "group_key": r[0],
+            "total_runs": r[1],
+            "success_runs": r[2],
+            "success_rate": round((r[2] or 0) / max(r[1] or 1, 1), 3),
+            "avg_cost_usd": round(r[3] or 0, 4),
+            "total_cost_usd": round(r[4] or 0, 4),
+            "avg_confidence": round(r[5] or 0, 3),
+        }
+        for r in rows
+    ]

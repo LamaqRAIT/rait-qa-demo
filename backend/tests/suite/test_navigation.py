@@ -1,5 +1,6 @@
 # INTENT: Core navigation links and header elements work across all pages.
 # JOURNEY: navigation
+# PAGE: /products.html
 import pytest
 from playwright.sync_api import Page, expect
 

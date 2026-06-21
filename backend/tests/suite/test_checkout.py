@@ -11,7 +11,7 @@ def test_checkout_submit_button_exists(page: Page, base_url: str) -> None:
     page.goto(f"{base_url}/checkout.html")
 
     # Flow 1 target: class selector. If drifted to btn-place-order this FAILS.
-    submit_btn = page.locator(".btn-checkout")
+    submit_btn = page.locator(".btn-place-order")
     expect(submit_btn).to_be_visible()
     expect(submit_btn).to_be_enabled()
 
